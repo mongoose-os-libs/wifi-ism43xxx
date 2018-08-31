@@ -1,0 +1,49 @@
+type: lib
+
+author: mongoose-os
+
+version: 1.0
+
+description: >
+  Driver for the Inventek eS-WiFi ISM43xxx module series (ISM4319-M3-xxx, ISM43362-M3G-xxx).
+  Only SPI version for now.
+
+sources:
+  - src
+
+includes:
+  - include
+
+libs:
+  - origin: https://github.com/mongoose-os-libs/core
+  - origin: https://github.com/mongoose-os-libs/spi
+  - origin: https://github.com/mongoose-os-libs/wifi
+
+config_schema:
+  - ["wifi.ism43xxx", "o", {title: "ISM43xxx-specific settings"}]
+  - ["wifi.ism43xxx.spi", "s", "", {title: "SPI config"}] # Empty - use default, or JSON config to create an instance.
+  - ["wifi.ism43xxx.spi_freq", "i", 20000000, {title: "SPI frequency"}]
+  - ["wifi.ism43xxx.cs_gpio", "i", -1, {title: "Chip Select pin"}]
+  - ["wifi.ism43xxx.drdy_gpio", "i", -1, {title: "Data Ready pin"}]
+  - ["wifi.ism43xxx.rst_gpio", "i", -1, {title: "Reset pin (optional)"}]
+  - ["wifi.ism43xxx.boot0_gpio", "i", -1, {title: "Boot0 pin (optional)"}]
+  - ["wifi.ism43xxx.wakeup_gpio", "i", -1, {title: "Wakeup pin (optional)"}]
+
+conds:
+  - when: build_vars.BOARD == "B-L475E-IOT01A"
+    apply:
+      config_schema:
+        #                                                    PC11.6                  PC12.6                  PC10:6
+        - ["wifi.ism43xxx.spi", '{"unit_no": 3, "miso_gpio": 0x6002b, "mosi_gpio": 0x6002c, "sclk_gpio": 0x6002a}']
+        - ["wifi.ism43xxx.cs_gpio", 0x40]      # CS = PE0
+        - ["wifi.ism43xxx.drdy_gpio", 0x41]    # DRDY = PE1
+        - ["wifi.ism43xxx.rst_gpio", 0x48]     # RST = PE8
+        - ["wifi.ism43xxx.boot0_gpio", 0x1c]   # BOOT0 = PB12
+        - ["wifi.ism43xxx.wakeup_gpio", 0x1d]  # WAKEUP = PB13
+
+tags:
+  - c
+  - hw
+  - wifi
+
+manifest_version: 2018-08-29
