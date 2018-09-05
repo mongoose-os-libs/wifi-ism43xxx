@@ -20,7 +20,7 @@
 #include "mgos.h"
 #include "mgos_wifi_hal.h"
 
-#include "ism43xxx_wifi.h"
+#include "ism43xxx_core.h"
 
 #define ISM43XXX_LINE_SEP "\r\n"
 

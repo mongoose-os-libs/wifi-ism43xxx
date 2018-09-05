@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include "ism43xxx_wifi.h"
+#include "ism43xxx_core.h"
 
 #include "mgos.h"
 #include "mgos_timers.h"
