@@ -24,10 +24,9 @@
 
 #define ISM43XXX_LINE_SEP "\r\n"
 
-struct ism43xxx_ctx *s_ctx = NULL;
+static struct ism43xxx_ctx *s_ctx = NULL;
 
-static char *asp(const char *fmt, ...) PRINTF_LIKE(1, 2);
-static char *asp(const char *fmt, ...) {
+char *asp(const char *fmt, ...) {
   char *res = NULL;
   va_list ap;
   va_start(ap, fmt);
@@ -53,7 +52,8 @@ bool ism43xxx_parse_mac(const char *s, uint8_t mac[6]) {
   return true;
 }
 
-static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
                            const struct mg_str payload) {
   int n = 0;
   struct ism43xxx_client_info ap_clients[ISM43XXX_AP_MAX_CLIENTS];
@@ -116,25 +116,29 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c, bool ok,
       }
     }
   }
-
+  (void) cmd;
   return ok;
 }
 
-static bool ism43xxx_pre_ad_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_pre_ad_cb(struct ism43xxx_ctx *c,
+                               const struct ism43xxx_cmd *cmd, bool ok,
                                struct mg_str p) {
   LOG(LL_INFO, ("AP starting..."));
   (void) c;
+  (void) cmd;
   (void) p;
   return ok;
 }
 
-static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
                            struct mg_str payload) {
   if (ok) {
     LOG(LL_INFO, ("AP started"));
   } else {
     LOG(LL_INFO, ("AP failed to start: %.*s", (int) payload.len, payload.p));
   }
+  (void) cmd;
   return ok;
 }
 
@@ -163,17 +167,17 @@ bool mgos_wifi_dev_ap_setup(const struct mgos_config_wifi_ap *cfg) {
       {.cmd = "CD", .ph = ism43xxx_ignore_error},
       {.cmd = "AE", .ph = ism43xxx_ignore_error},
       /* SSID */
-      {.cmd = asp("AS=0,%s", cfg->ssid), .free_cmd = true},
-      /* Security (0 = open, 3 = WPA2) */
-      {.cmd = (cfg->pass ? "A1=3" : "A1=0")},
+      {.cmd = asp("AS=0,%s", cfg->ssid), .free = true},
+      /* Security (0 = open, 3 = WPA2, 4 = WPA+WPA2) */
+      {.cmd = (cfg->pass ? "A1=4" : "A1=0")},
       /* Password */
-      {.cmd = asp("A2=%s", (cfg->pass ? cfg->pass : "")), .free_cmd = true},
+      {.cmd = asp("A2=%s", (cfg->pass ? cfg->pass : "")), .free = true},
       /* Channel; 0 = auto */
-      {.cmd = asp("AC=%d", cfg->channel), .free_cmd = true},
+      {.cmd = asp("AC=%d", cfg->channel), .free = true},
       /* Max num clients */
-      {.cmd = asp("AT=%d", max_clients), .free_cmd = true},
+      {.cmd = asp("AT=%d", max_clients), .free = true},
       /* AP's IP address. Netmask is not configurable. */
-      {.cmd = asp("Z6=%s", cfg->ip), .free_cmd = true},
+      {.cmd = asp("Z6=%s", cfg->ip), .free = true},
       /* No power saving */
       {.cmd = "ZP=0", .ph = ism43xxx_pre_ad_cb},
       /* Activate */
@@ -182,15 +186,13 @@ bool mgos_wifi_dev_ap_setup(const struct mgos_config_wifi_ap *cfg) {
   };
 
   if (c->phase == ISM43XXX_PHASE_CMD && c->mode == ISM43XXX_MODE_IDLE) {
-    ism43xxx_send_cmd_seq(c, ism43xxx_ap_setup_seq, true /* copy */);
+    res = ism43xxx_send_seq(c, ism43xxx_ap_setup_seq, true /* copy */) != NULL;
   } else {
     ism43xxx_reset(c, false /* hold */);
-    ism43xxx_send_cmd_seq(c, ism43xxx_ap_setup_seq, true /* copy */);
+    res = ism43xxx_send_seq(c, ism43xxx_ap_setup_seq, true /* copy */) != NULL;
   }
 
-  c->mode = ISM43XXX_MODE_AP;
-
-  res = true;
+  if (res) c->mode = ISM43XXX_MODE_AP;
 
 out:
   return res;
@@ -209,30 +211,31 @@ void ism43xxx_set_sta_status(struct ism43xxx_ctx *c, bool connected,
       }
     } else {
       mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_DISCONNECTED, NULL);
+      if (c->if_disconnect_cb != NULL) c->if_disconnect_cb(c->if_cb_arg);
     }
   }
 }
 
-static bool ism43xxx_pre_c0_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_pre_c0_cb(struct ism43xxx_ctx *c,
+                               const struct ism43xxx_cmd *cmd, bool ok,
                                struct mg_str p) {
   LOG(LL_INFO, ("STA connecting..."));
   (void) c;
+  (void) cmd;
   (void) p;
   return true;
 }
 
-static bool ism43xxx_c0_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
-  /* Suppress the error to prevent automated replay.
-   * CS will report disconnection and upper layer will re-connect. */
-  return true;
-}
-
-static bool ism43xxx_cr_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
+static bool ism43xxx_cr_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p) {
   c->sta_rssi = (ok ? strtol(p.p, NULL, 10) : 0);
+  (void) cmd;
   return true;
 }
 
-static bool ism43xxx_cinfo_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_cinfo_cb(struct ism43xxx_ctx *c,
+                              const struct ism43xxx_cmd *cmd, bool ok,
                               struct mg_str p) {
   struct mg_str s = mg_strstrip(p), ip, nm, gw, dns, status, unused;
   bool sta_connected = false;
@@ -272,28 +275,36 @@ static bool ism43xxx_cinfo_cb(struct ism43xxx_ctx *c, bool ok,
     }
   }
   ism43xxx_set_sta_status(c, sta_connected, true /* force */);
+  (void) cmd;
   return true;
 }
 
-static bool ism43xxx_cs_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
+static bool ism43xxx_cs_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p) {
   if (ok) {
     bool sta_connected = (p.p[0] == '1');
     ism43xxx_set_sta_status(c, sta_connected, false /* force */);
   }
+  (void) cmd;
   return ok;
 }
 
-static bool ism43xxx_cd_cb(struct ism43xxx_ctx *c, bool ok,
-                           struct mg_str payload) {
+static bool ism43xxx_cd_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p) {
   if (ok) {
     ism43xxx_set_sta_status(c, false /* connected */, false /* force */);
   }
+  (void) cmd;
   return ok;
 }
 
 const struct ism43xxx_cmd ism43xxx_sta_connect_seq[] = {
     {.cmd = "C?", .ph = ism43xxx_pre_c0_cb},
-    {.cmd = "C0", .ph = ism43xxx_c0_cb, .timeout = 20},
+    /* Suppress the error from C0 to prevent automatic retry.
+     * CS will report disconnection and upper layer will re-connect. */
+    {.cmd = "C0", .ph = ism43xxx_ignore_error, .timeout = 20},
     {.cmd = "CR", .ph = ism43xxx_cr_cb}, /* Get RSSI */
     {.cmd = "C?", .ph = ism43xxx_cinfo_cb},
     {.cmd = NULL},
@@ -328,16 +339,16 @@ bool mgos_wifi_dev_sta_setup(const struct mgos_config_wifi_sta *cfg) {
       /* Disable STA and AP, if enabled, to start with a clean slate. */
       {.cmd = "CD", .ph = ism43xxx_ignore_error},
       {.cmd = "AE", .ph = ism43xxx_ignore_error},
-      {.cmd = asp("C1=%s", cfg->ssid), .free_cmd = true},
-      {.cmd = asp("C2=%s", (cfg->pass ? cfg->pass : "")), .free_cmd = true},
+      {.cmd = asp("C1=%s", cfg->ssid), .free = true},
+      {.cmd = asp("C2=%s", (cfg->pass ? cfg->pass : "")), .free = true},
       /* Security (0 = open, 4 = WPA+WPA2) */
       {.cmd = (cfg->pass != NULL ? "C3=4" : "C3=0")},
       /* DHCP (1 = on, 0 = off, use static IP) */
       {.cmd = (static_ip ? "C4=0" : "C4=1")},
-      {.cmd = asp("C6=%s", (cfg->ip ? cfg->ip : "0.0.0.0")), .free_cmd = true},
+      {.cmd = asp("C6=%s", (cfg->ip ? cfg->ip : "0.0.0.0")), .free = true},
       {.cmd = asp("C7=%s", (cfg->netmask ? cfg->netmask : "0.0.0.0")),
-       .free_cmd = true},
-      {.cmd = asp("C8=%s", (cfg->gw ? cfg->gw : "0.0.0.0")), .free_cmd = true},
+       .free = true},
+      {.cmd = asp("C8=%s", (cfg->gw ? cfg->gw : "0.0.0.0")), .free = true},
       /* 0 = IPv4, 1 = IPv6 */
       {.cmd = "C5=0"},
       /* Retry count - try once. Reconnects will be handled by higher layers. */
@@ -346,15 +357,13 @@ bool mgos_wifi_dev_sta_setup(const struct mgos_config_wifi_sta *cfg) {
   };
 
   if (c->phase == ISM43XXX_PHASE_CMD && c->mode == ISM43XXX_MODE_IDLE) {
-    ism43xxx_send_cmd_seq(c, ism43xxx_sta_setup_seq, true /* copy */);
+    res = ism43xxx_send_seq(c, ism43xxx_sta_setup_seq, true /* copy */) != NULL;
   } else {
     ism43xxx_reset(c, false /* hold */);
-    ism43xxx_send_cmd_seq(c, ism43xxx_sta_setup_seq, true /* copy */);
+    res = ism43xxx_send_seq(c, ism43xxx_sta_setup_seq, true /* copy */) != NULL;
   }
 
-  c->mode = ISM43XXX_MODE_STA;
-
-  res = true;
+  if (res) c->mode = ISM43XXX_MODE_STA;
 
 out:
   return res;
@@ -363,15 +372,15 @@ out:
 bool mgos_wifi_dev_sta_connect(void) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) s_ctx;
   if (c->mode != ISM43XXX_MODE_STA) return false;
-  ism43xxx_send_cmd_seq(c, ism43xxx_sta_connect_seq, false /* copy */);
-  return true;
+  return (ism43xxx_send_seq(c, ism43xxx_sta_connect_seq, false /* copy */) !=
+          NULL);
 }
 
 bool mgos_wifi_dev_sta_disconnect(void) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) s_ctx;
   if (c->mode != ISM43XXX_MODE_STA) return false;
-  ism43xxx_send_cmd_seq(c, ism43xxx_sta_disconnect_seq, false /* copy */);
-  return true;
+  return (ism43xxx_send_seq(c, ism43xxx_sta_disconnect_seq, false /* copy */) !=
+          NULL);
 }
 
 char *mgos_wifi_get_connected_ssid(void) {
@@ -437,6 +446,12 @@ void mgos_wifi_dev_init(void) {
   }
 }
 
+bool mgos_wifi_dev_start_scan(void) {
+  /* TODO(rojer) */
+  LOG(LL_ERROR, ("Scannig is not implemented!"));
+  return false;
+}
+
 void mgos_wifi_dev_deinit(void) {
   ism43xxx_reset(s_ctx, true /* hold */);
 }
@@ -444,4 +459,10 @@ void mgos_wifi_dev_deinit(void) {
 bool mgos_wifi_ism43xxx_init(void) {
   /* Real init happens in mgos_wifi_dev_init */
   return true;
+}
+
+struct ism43xxx_ctx *ism43xxx_get_ctx(void) {
+  if (s_ctx == NULL) return NULL;
+  if (s_ctx->mode == ISM43XXX_MODE_IDLE) return false;
+  return s_ctx;
 }

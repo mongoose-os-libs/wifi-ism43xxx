@@ -29,6 +29,10 @@ config_schema:
   - ["wifi.ism43xxx.boot0_gpio", "i", -1, {title: "Boot0 pin (optional)"}]
   - ["wifi.ism43xxx.wakeup_gpio", "i", -1, {title: "Wakeup pin (optional)"}]
 
+build_vars:
+  # This smells, but will do for now.
+  MGOS_MG_NET_IF: -1
+
 conds:
   - when: build_vars.BOARD == "B-L475E-IOT01A"
     apply:

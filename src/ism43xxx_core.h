@@ -32,6 +32,14 @@ extern "C" {
 
 /* Per datasheet, 4 is the maximum number of clients supported. */
 #define ISM43XXX_AP_MAX_CLIENTS 4
+/* Transport layet supports up to 4 sockets. */
+#define ISM43XXX_AP_MAX_SOCKETS 4
+/* Length of the sequence queue */
+#define ISM43XXX_MAX_QUEUE_SIZE 8
+/* Maximum UDP read/write size. 1200 is the maximum supported by the module. */
+#define ISM43XXX_MAX_UDP_IO_SIZE 1200
+/* Maximum TCP read/write size. */
+#define ISM43XXX_MAX_TCP_IO_SIZE 512
 
 enum ism43xxx_phase {
   ISM43XXX_PHASE_RESET = 0,
@@ -66,8 +74,9 @@ struct ism43xxx_ctx {
   enum ism43xxx_mode mode;
   /* Current SPI communication phase: reset, init, command or data. */
   enum ism43xxx_phase phase;
-  /* Command sequences, current and queued. */
-  const struct ism43xxx_cmd *cur_seq, *seq_q[3];
+  /* Command sequence queue. */
+  const struct ism43xxx_cmd *seq_q[ISM43XXX_MAX_QUEUE_SIZE];
+  /* Current command (within the first queued sequence). */
   const struct ism43xxx_cmd *cur_cmd;
 
   mgos_timer_id startup_timer_id;
@@ -84,37 +93,63 @@ struct ism43xxx_ctx {
   unsigned int cur_cmd_timeout : 8;
   unsigned int idle_timeout : 8;
   unsigned int need_poll : 1;
+  unsigned int polling : 1;
   unsigned int print_mac : 1;
   unsigned int print_info : 1;
   unsigned int sta_connected : 1;
+
+  void (*if_disconnect_cb)(void *arg);
+  void (*if_data_poll_cb)(void *arg);
+  void *if_cb_arg;
 };
 
 struct ism43xxx_cmd {
   /* Command */
   const char *cmd;
-  /* Timeout, in seconds. 0 means default. */
-  int timeout;
   /* Payload handler (optional). */
-  bool (*ph)(struct ism43xxx_ctx *c, bool ok, struct mg_str payload);
+  bool (*ph)(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd, bool ok,
+             struct mg_str resp);
+  /* User-supplied pointer, not used. */
+  void *user_data;
+  /* Length. If not specified, assume cmd is an ASCIIZ ztring. */
+  unsigned int len : 16;
+  /* Timeout, in seconds. 0 means default. */
+  unsigned int timeout : 8;
+  /* This command is continued in the next entry, do not release CS. */
+  unsigned int cont : 1;
   /* cmd is dynamically allocated and should be freed when done. */
-  bool free_cmd;
+  unsigned int free : 1;
 };
 
 bool ism43xxx_init(struct ism43xxx_ctx *c);
 
 void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold);
 
-bool ism43xxx_send_cmd_seq(struct ism43xxx_ctx *c,
-                           const struct ism43xxx_cmd *seq, bool copy);
+const struct ism43xxx_cmd *ism43xxx_send_seq(struct ism43xxx_ctx *c,
+                                             const struct ism43xxx_cmd *seq,
+                                             bool copy);
 
-bool ism43xxx_ignore_error(struct ism43xxx_ctx *c, bool ok, struct mg_str p);
+void ism43xxx_abort_seq(struct ism43xxx_ctx *c,
+                        const struct ism43xxx_cmd **seq);
+
+bool ism43xxx_ignore_error(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p);
 
 bool ism43xxx_parse_mac(const char *s, uint8_t mac[6]);
 
 void ism43xxx_set_sta_status(struct ism43xxx_ctx *c, bool connected,
                              bool force);
 
-bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p);
+bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd,
+                    bool ok, struct mg_str p);
+
+struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
+                                        const struct mg_str p);
+
+struct ism43xxx_ctx *ism43xxx_get_ctx(void);
+
+char *asp(const char *fmt, ...) PRINTF_LIKE(1, 2);
 
 #ifdef __cplusplus
 }

@@ -34,14 +34,18 @@
 #define ISM43XXX_IDLE_TIMEOUT 5
 #define ISM43XXX_DEFAULT_CMD_TIMEOUT 5
 
-bool ism43xxx_ignore_error(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
+bool ism43xxx_ignore_error(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p) {
   (void) c;
+  (void) cmd;
   (void) ok;
   (void) p;
   return true;
 }
 
-static bool ism43xxx_info_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_info_cb(struct ism43xxx_ctx *c,
+                             const struct ism43xxx_cmd *cmd, bool ok,
                              struct mg_str info) {
   if (!ok) return false;
   if (!c->print_info) return true;
@@ -56,10 +60,12 @@ static bool ism43xxx_info_cb(struct ism43xxx_ctx *c, bool ok,
   LOG(LL_INFO, ("%.*s %.*s fw %.*s", (int) prod_name.len, prod_name.p,
                 (int) prod_id.len, prod_id.p, (int) fw_rev.len, fw_rev.p));
   c->print_info = false;
+  (void) cmd;
   return true;
 };
 
-static bool ism43xxx_get_mac_cb(struct ism43xxx_ctx *c, bool ok,
+static bool ism43xxx_get_mac_cb(struct ism43xxx_ctx *c,
+                                const struct ism43xxx_cmd *cmd, bool ok,
                                 struct mg_str mac) {
   if (!ok) return false;
   mac = mg_strstrip(mac);
@@ -68,6 +74,7 @@ static bool ism43xxx_get_mac_cb(struct ism43xxx_ctx *c, bool ok,
     LOG(LL_INFO, ("MAC: %.*s", (int) mac.len, mac.p));
     c->print_mac = false;
   }
+  (void) cmd;
   return ok;
 };
 
@@ -76,18 +83,19 @@ static const struct ism43xxx_cmd ism43xxx_init_seq[] = {
     {.cmd = "I?", .ph = ism43xxx_info_cb},
     {.cmd = "Z5", .ph = ism43xxx_get_mac_cb},
     {.cmd = "MT=1"},
+    {.cmd = "PK=1,20000"},
     {.cmd = NULL},
 };
 
-bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
-  if (!ok) return false;
+struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
+                                        const struct mg_str p) {
+  struct mg_str res = p;
   const char *begin = mg_strstr(p, mg_mk_str(ISM43XXX_ASYNC_RESP_BEGIN));
   const char *end = mg_strstr(p, mg_mk_str(ISM43XXX_ASYNC_RESP_END));
   const struct mg_str sep = mg_mk_str(ISM43XXX_LINE_SEP);
   struct mg_str buf;
   if (begin == NULL || end < begin + (sizeof(ISM43XXX_ASYNC_RESP_BEGIN) - 1)) {
-    ok = false;
-    goto out;
+    return res;
   }
   begin += (sizeof(ISM43XXX_ASYNC_RESP_BEGIN) - 1);
   buf = mg_mk_str_n(begin, end - begin);
@@ -103,8 +111,17 @@ bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, bool ok, struct mg_str p) {
     buf.p += line.len;
     buf.len -= line.len;
   }
-out:
-  return ok;
+  res.p = end + sizeof(ISM43XXX_ASYNC_RESP_END) - 1;
+  res.len = (p.p + p.len) - res.p;
+  return res;
+}
+
+bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd,
+                    bool ok, struct mg_str p) {
+  if (!ok) return false;
+  c->polling = false;
+  (void) cmd;
+  return true;
 }
 
 static const struct ism43xxx_cmd ism43xxx_poll_seq[] = {
@@ -117,45 +134,89 @@ extern const struct ism43xxx_cmd ism43xxx_sta_poll_seq[];
 
 static void ism43xxx_state_cb(void *arg);
 
-#define APPEND_BYTE(b)                            \
-  data[(len % 2 == 0 ? len + 1 : len - 1)] = (b); \
-  len++;
+static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
+                              const struct ism43xxx_cmd **seq, bool ok);
 
-static void ism43xxx_free_cmd_seq(struct ism43xxx_ctx *c,
-                                  const struct ism43xxx_cmd **seq);
-
-void ism43xxx_send_cmd(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd) {
-  uint8_t data[100];
-  memset(data, ISM43XXX_PAD_OUT_CHAR, sizeof(data));
-  const char *p = cmd->cmd;
-  LOG(LL_DEBUG, ("-> %s", cmd->cmd));
-  size_t len = 0;
-  while (*p != '\0') {
-    APPEND_BYTE(*p++);
+static void ism43xxx_send_cmd(struct ism43xxx_ctx *c,
+                              const struct ism43xxx_cmd *cmd, size_t *tot_len,
+                              bool *carry, uint8_t *cb) {
+  uint8_t data[66];
+  const uint8_t *cp = (const uint8_t *) cmd->cmd;
+  size_t cmd_len = cmd->len;
+  size_t data_len = 0;
+  if (cmd_len == 0) {
+    cmd_len = strlen(cmd->cmd);
+    LOG(LL_VERBOSE_DEBUG, ("-> %s", cmd->cmd));
+  } else {
+    LOG(LL_VERBOSE_DEBUG, ("-> %u bytes", (unsigned int) cmd_len));
   }
-  APPEND_BYTE('\r');
-  APPEND_BYTE('\n');
-  if (len % 2 != 0) {
-    data[len++] = ISM43XXX_PAD_OUT_CHAR;
+  if (*carry) {
+    data[0] = *cb;
+    data_len = 1;
+    (*tot_len)++;
   }
   mgos_gpio_write(c->cs_gpio, 0);
   mgos_usleep(15);
-  const struct mgos_spi_txn txn = {
-      .cs = -1,
-      .mode = 0,
-      .freq = c->spi_freq,
-      .fd.len = len,
-      .fd.tx_data = data,
-      .fd.rx_data = data,
-  };
-  mgos_spi_run_txn(c->spi, true /* full_duplex */, &txn);
-  mgos_gpio_write(c->cs_gpio, 1);
+  while (cmd_len > 0) {
+    size_t avail = sizeof(data) - data_len - 2 /* for \r and padding */;
+    size_t len = MIN(avail, cmd_len);
+    if (cmd->cont && (data_len + len) % 2 != 0) {
+      len--;
+    }
+    memcpy(data + data_len, cp, len);
+    cp += len;
+    cmd_len -= len;
+    data_len += len;
+    *tot_len += len;
+    if (!cmd->cont) {
+      /* Last portion of a textual command - add CR */
+      if (cmd->len == 0 && cmd_len == 0) {
+        data[data_len++] = '\r';
+        (*tot_len)++;
+      }
+      /* Pad with \n if needed */
+      if (*tot_len % 2 != 0) {
+        data[data_len++] = ISM43XXX_PAD_OUT_CHAR;
+        (*tot_len)++;
+      }
+    }
+    /* Swap bytes in words */
+    for (size_t i = 0; i < data_len; i += 2) {
+      uint8_t a, b;
+      a = data[i];
+      b = data[i + 1];
+      data[i] = b;
+      data[i + 1] = a;
+    }
+    const struct mgos_spi_txn txn = {
+        .cs = -1,
+        .mode = 0,
+        .freq = c->spi_freq,
+        .hd.tx_len = data_len,
+        .hd.tx_data = data,
+    };
+    mgos_spi_run_txn(c->spi, false /* full_duplex */, &txn);
+    if (cmd->cont && cmd_len < 2) {
+      if (cmd_len == 1) {
+        *carry = true;
+        *cb = *cp;
+      } else {
+        *carry = false;
+      }
+      break;
+    }
+    data_len = 0;
+  }
+  if (!cmd->cont) mgos_gpio_write(c->cs_gpio, 1);
   c->cur_cmd_timeout =
       (cmd->timeout > 0 ? cmd->timeout : ISM43XXX_DEFAULT_CMD_TIMEOUT);
 }
 
-bool ism43xxx_send_cmd_seq(struct ism43xxx_ctx *c,
-                           const struct ism43xxx_cmd *seq, bool copy) {
+static void ism43xxx_send_next_seq(struct ism43xxx_ctx *c);
+
+const struct ism43xxx_cmd *ism43xxx_send_seq(struct ism43xxx_ctx *c,
+                                             const struct ism43xxx_cmd *seq,
+                                             bool copy) {
   if (copy) {
     const struct ism43xxx_cmd *cmd = seq;
     while (cmd->cmd != NULL) cmd++;
@@ -163,52 +224,69 @@ bool ism43xxx_send_cmd_seq(struct ism43xxx_ctx *c,
     struct ism43xxx_cmd *seq_copy = malloc(seq_size);
     if (seq_copy == NULL) return false;
     memcpy(seq_copy, seq, seq_size);
-    seq_copy[cmd - seq].free_cmd = true;
+    seq_copy[cmd - seq].free = true;
     seq = seq_copy;
   }
-  if (c->cur_seq == NULL) {
-    c->cur_seq = seq;
-  } else {
-    for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
-      if (c->seq_q[i] == NULL) {
-        LOG(LL_DEBUG, ("enq seq %p at %d", seq, i));
-        c->seq_q[i] = seq;
-        return true;
+  for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
+    if (c->seq_q[i] == NULL) {
+      c->seq_q[i] = seq;
+      if (i == 0) {
+        ism43xxx_send_next_seq(c);
+      } else {
+        LOG(LL_DEBUG, ("enq seq %p (%s) @ %d", seq, seq->cmd, i));
       }
+      return seq;
     }
-    LOG(LL_ERROR, ("seq_q overflow!"));
-    return false;
   }
-  c->cur_cmd = c->cur_seq;
-  if (c->cur_seq != NULL) {
-    LOG(LL_DEBUG, ("send seq %p", seq));
-    mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
-  }
-  return true;
+  LOG(LL_ERROR, ("seq_q overflow!"));
+  return NULL;
 }
 
 static void ism43xxx_send_next_seq(struct ism43xxx_ctx *c) {
-  const struct ism43xxx_cmd *seq = c->seq_q[0];
-  if (seq != NULL) {
-    memmove(c->seq_q, c->seq_q + 1,
-            (ARRAY_SIZE(c->seq_q) - 1) * sizeof(c->seq_q[0]));
-    c->seq_q[ARRAY_SIZE(c->seq_q) - 1] = NULL;
-  }
-  ism43xxx_send_cmd_seq(c, seq, false /* copy */);
+  if (c->cur_cmd != NULL) return;
+  c->cur_cmd = c->seq_q[0];
+  if (c->cur_cmd == NULL) return;
+  LOG(LL_DEBUG, ("sending seq %p (%s)", c->cur_cmd, c->cur_cmd->cmd));
+  mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
 }
 
-static void ism43xxx_free_cmd_seq(struct ism43xxx_ctx *c,
-                                  const struct ism43xxx_cmd **seq) {
-  if (*seq == NULL) return;
-  const struct ism43xxx_cmd *cmd = *seq;
-  LOG(LL_DEBUG, ("free seq %p", *seq));
+static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
+                              const struct ism43xxx_cmd **seqp, bool ok) {
+  const struct ism43xxx_cmd *seq = *seqp;
+  if (seq == NULL) return ok;
+  bool found = false;
+  for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
+    if (c->seq_q[i] == seq) {
+      c->seq_q[i] = NULL;
+      if (i < ARRAY_SIZE(c->seq_q) - 1) {
+        memmove(c->seq_q + i, c->seq_q + i + 1,
+                (ARRAY_SIZE(c->seq_q) - i - 1) * sizeof(c->seq_q[0]));
+      }
+      if (i == 0) c->cur_cmd = NULL;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    *seqp = NULL;
+  }
+  LOG(LL_DEBUG, ("free seq %p", seq));
+  const struct ism43xxx_cmd *cmd = seq;
   while (cmd->cmd != NULL) {
-    if (cmd->free_cmd) free((void *) cmd->cmd);
+    if (cmd->free) free((void *) cmd->cmd);
     cmd++;
   }
-  /* free_cmd on the final entry means free the sequence itself. */
-  if (cmd->free_cmd) free((void *) *seq);
-  *seq = NULL;
+  struct mg_str null_str = MG_NULL_STR;
+  if (cmd->ph != NULL) ok = cmd->ph(c, cmd, ok, null_str);
+  /* free on the final entry means free the sequence itself. */
+  if (cmd->free) free((void *) seq);
+  return ok;
+}
+
+void ism43xxx_abort_seq(struct ism43xxx_ctx *c,
+                        const struct ism43xxx_cmd **seq) {
+  if (*seq) LOG(LL_DEBUG, ("abort seq %p", *seq));
+  ism43xxx_free_seq(c, seq, false /* ok */);
 }
 
 static void ism43xxx_startup_timer_cb(void *arg) {
@@ -220,7 +298,8 @@ static void ism43xxx_startup_timer_cb(void *arg) {
 
 static void ism43xxx_poll_timer_cb(void *arg) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
-  c->need_poll = true;
+  static int poll_intvl = 0;
+  if (++poll_intvl % 4 == 0) c->need_poll = true;
   if (c->idle_timeout > 0) c->idle_timeout--;
   if (c->cur_cmd_timeout > 0) c->cur_cmd_timeout--;
   ism43xxx_state_cb(arg);
@@ -236,20 +315,22 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
     // May take a few attempts, depending on the current phase.
     LOG(LL_DEBUG, ("Sending soft reset request..."));
     struct ism43xxx_cmd zr = {.cmd = "ZR"};
-    ism43xxx_send_cmd(c, &zr);
+    size_t tot_len = 0;
+    bool carry = false;
+    uint8_t cb = 0;
+    ism43xxx_send_cmd(c, &zr, &tot_len, &carry, &cb);
   }
   mgos_clear_timer(c->poll_timer_id);
   c->poll_timer_id = MGOS_INVALID_TIMER_ID;
-  c->need_poll = false;
+  c->polling = c->need_poll = false;
   mgos_clear_timer(c->startup_timer_id);
   c->startup_timer_id = MGOS_INVALID_TIMER_ID;
+  while (c->seq_q[0] != NULL) {
+    ism43xxx_abort_seq(c, &c->seq_q[0]);
+  }
   ism43xxx_set_sta_status(c, false /* connected */,
                           (c->mode == ISM43XXX_MODE_STA) /* force */);
-  ism43xxx_free_cmd_seq(c, &c->cur_seq);
-  for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
-    ism43xxx_free_cmd_seq(c, &c->seq_q[i]);
-  }
-  ism43xxx_send_cmd_seq(c, ism43xxx_init_seq, false /* copy */);
+  if (c->if_disconnect_cb != NULL) c->if_disconnect_cb(c->if_cb_arg);
   c->idle_timeout = 0;
   c->cur_cmd_timeout = 0;
   c->mode = ISM43XXX_MODE_IDLE;
@@ -262,18 +343,12 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
     c->startup_timer_id = mgos_set_timer(ISM43XXX_STARTUP_DELAY_MS, 0,
                                          ism43xxx_startup_timer_cb, c);
     if (c->rst_gpio >= 0) mgos_gpio_write(c->rst_gpio, 1);
+    ism43xxx_send_seq(c, ism43xxx_init_seq, false /* copy */);
   } else {
     /* If we don't have the reset pin, module will boot but we'll ignore that
      * and start with another reset next time. */
     if (c->rst_gpio >= 0) LOG(LL_DEBUG, ("Keeping the module in reset"));
   }
-}
-
-static void ism43xxx_reset_and_retry(struct ism43xxx_ctx *c) {
-  const struct ism43xxx_cmd *cur_seq = c->cur_seq;
-  c->cur_seq = NULL;
-  ism43xxx_reset(c, false /* hold */);
-  ism43xxx_send_cmd_seq(c, cur_seq, false /* copy */);
 }
 
 static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
@@ -300,7 +375,8 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
     rx_len += 2;
     if (rx_len > 1500) {
       LOG(LL_ERROR, ("Runaway Rx, reset"));
-      ism43xxx_reset_and_retry(c);
+      mg_hexdumpf(stderr, rxb->buf, rxb->len);
+      ism43xxx_reset(c, true /* hold */);
       return false;
     }
   }
@@ -313,16 +389,16 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
       mbuf_remove(rxb, 1);
     }
   }
-  LOG(LL_DEBUG, ("rx_len %d (tot %d)", (int) rx_len, (int) rxb->len));
+  LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d)", (int) rx_len, (int) rxb->len));
   return (rxb->len > 0);
 }
 
-static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
-  struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
+static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
   bool drdy = mgos_gpio_read(c->drdy_gpio);
 
-  LOG(LL_DEBUG, ("ph %d m %d drdy %d it %d hf %d", c->phase, c->mode, drdy,
-                 c->idle_timeout, (int) mgos_get_free_heap_size()));
+  LOG(LL_VERBOSE_DEBUG,
+      ("ph %d m %d drdy %d seq %p it %d hf %d", c->phase, c->mode, drdy,
+       c->seq_q[0], c->idle_timeout, (int) mgos_get_free_heap_size()));
 
   switch (c->phase) {
     case ISM43XXX_PHASE_RESET: {
@@ -336,33 +412,35 @@ static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
       struct mg_str bs = mg_mk_str_n(rxb->buf, rxb->len);
       if (bs.len == 0) {
         LOG(LL_ERROR, ("No prompt after reset"));
-        ism43xxx_reset_and_retry(c);
+        ism43xxx_reset(c, true /* hold */);
       } else if (mg_vcmp(&bs, ISM43XXX_LINE_SEP ISM43XXX_PROMPT) != 0) {
         LOG(LL_ERROR, ("Wrong prompt"));
-        ism43xxx_reset_and_retry(c);
+        ism43xxx_reset(c, true /* hold */);
         break;
       }
       mgos_gpio_enable_int(c->drdy_gpio);
       c->phase = ISM43XXX_PHASE_CMD;
       c->idle_timeout = ISM43XXX_IDLE_TIMEOUT;
-      c->poll_timer_id =
-          mgos_set_timer(ISM43XXX_POLL_INTERVAL_MS, MGOS_TIMER_REPEAT,
-                         ism43xxx_poll_timer_cb, c);
+      c->poll_timer_id = mgos_set_timer(ISM43XXX_POLL_INTERVAL_MS,
+                                        MGOS_TIMER_RUN_NOW | MGOS_TIMER_REPEAT,
+                                        ism43xxx_poll_timer_cb, c);
       break;
     }
     case ISM43XXX_PHASE_CMD: {
       if (!drdy) break; /* In this case DRDY means "ready for command". */
-      if (c->cur_cmd == NULL && c->need_poll) {
+      if (c->need_poll && !c->polling) {
+        LOG(LL_DEBUG, ("poll %d", (int) mgos_get_free_heap_size()));
         c->need_poll = false;
+        c->polling = true;
         switch (c->mode) {
           case ISM43XXX_MODE_AP:
-            ism43xxx_send_cmd_seq(c, ism43xxx_ap_poll_seq, false /* copy */);
+            ism43xxx_send_seq(c, ism43xxx_ap_poll_seq, false /* copy */);
             break;
           case ISM43XXX_MODE_STA:
-            ism43xxx_send_cmd_seq(c, ism43xxx_sta_poll_seq, false /* copy */);
+            ism43xxx_send_seq(c, ism43xxx_sta_poll_seq, false /* copy */);
             break;
           case ISM43XXX_MODE_IDLE:
-            ism43xxx_send_cmd_seq(c, ism43xxx_poll_seq, false /* copy */);
+            ism43xxx_send_seq(c, ism43xxx_poll_seq, false /* copy */);
             if (c->idle_timeout <= 0 && c->rst_gpio >= 0) {
               LOG(LL_DEBUG, ("Module is idle, suspending"));
               ism43xxx_reset(c, true /* hold */);
@@ -371,8 +449,19 @@ static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
             break;
         }
       }
-      if (c->cur_cmd != NULL) {
-        ism43xxx_send_cmd(c, c->cur_cmd);
+      size_t tot_cmd_len = 0;
+      bool carry = false;
+      uint8_t cb = 0;
+      while (c->cur_cmd != NULL && c->cur_cmd->cmd != NULL) {
+        ism43xxx_send_cmd(c, c->cur_cmd, &tot_cmd_len, &carry, &cb);
+        if (c->cur_cmd->cont) {
+          c->cur_cmd++;
+          continue;
+        } else {
+          break;
+        }
+      }
+      if (tot_cmd_len > 0) {
         c->phase = ISM43XXX_PHASE_RESP;
       }
       break;
@@ -383,10 +472,16 @@ static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
         if (c->cur_cmd != NULL) {
           if (c->cur_cmd_timeout <= 0) {
             LOG(LL_ERROR, ("No response to '%s'", cmd->cmd));
-            ism43xxx_reset_and_retry(c);
+            ism43xxx_reset(c, true /* hold */);
             return;
           }
         }
+        break;
+      }
+      if (cmd == NULL) {
+        /* Sequnce was aborted, we don't care about the response. */
+        ism43xxx_send_next_seq(c);
+        c->phase = ISM43XXX_PHASE_CMD;
         break;
       }
       const struct mg_str sep = mg_mk_str(ISM43XXX_LINE_SEP);
@@ -405,36 +500,37 @@ static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
           s.p += line.len + sep.len;
           s.len -= line.len + sep.len;
           if (line.len == 0) continue;
-          LOG(LL_DEBUG, ("<- %.*s", (int) line.len, line.p));
+          LOG(LL_VERBOSE_DEBUG, ("<- %.*s", (int) line.len, line.p));
         } else if (mg_vcmp(&s, ISM43XXX_PROMPT) == 0) {
           /* Previous line is the status. */
           bool ok = (mg_vcmp(&line, ISM43XXX_RESP_OK) == 0);
           if (cmd->ph != NULL) {
             const struct mg_str payload = mg_mk_str_n(buf.p, line.p - buf.p);
-            ok = cmd->ph(c, ok, payload);
+            ok = cmd->ph(c, cmd, ok, payload);
           }
           if (ok) {
             c->phase = ISM43XXX_PHASE_CMD;
             c->cur_cmd++;
             if (c->cur_cmd->cmd != NULL) {
-              mgos_invoke_cb(ism43xxx_state_cb, arg, false /* from_isr */);
+              mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
             } else {
-              c->cur_cmd = NULL;
-              LOG(LL_DEBUG, ("seq %p done", c->cur_seq));
-              ism43xxx_free_cmd_seq(c, &c->cur_seq);
+              ism43xxx_free_seq(c, &c->seq_q[0], ok);
               ism43xxx_send_next_seq(c);
             }
           } else {
-            LOG(LL_ERROR, ("Error response to '%s':\n%.*s", cmd->cmd,
-                           (int) buf.len, buf.p));
-            ism43xxx_reset_and_retry(c);
-            return;
+            c->cur_cmd = NULL;
+            ok = ism43xxx_free_seq(c, &c->seq_q[0], ok);
+            if (!ok) {
+              LOG(LL_ERROR, ("Error response to '%s':\n%.*s", cmd->cmd,
+                             (int) buf.len, buf.p));
+            }
+            ism43xxx_send_next_seq(c);
           }
           break;
         } else {
           LOG(LL_ERROR,
               ("Unterminated string at the end '%.*s'", (int) s.len, s.p));
-          ism43xxx_reset_and_retry(c);
+          ism43xxx_reset(c, true /* hold */);
           return;
         }
       }
@@ -452,15 +548,20 @@ static void ism43xxx_state_cb2(void *arg, struct mbuf *rxb) {
 }
 
 static void ism43xxx_state_cb(void *arg) {
+  struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
   struct mbuf rxb;
   mbuf_init(&rxb, 0);
-  ism43xxx_state_cb2(arg, &rxb);
+  ism43xxx_state_cb2(c, &rxb);
   mbuf_free(&rxb);
+  /* No commands but module signals data ready? Do a poll. */
+  if (c->cur_cmd == NULL && mgos_gpio_read(c->drdy_gpio)) {
+    if (c->if_data_poll_cb != NULL) c->if_data_poll_cb(c->if_cb_arg);
+  }
 }
 
 static void ism43xxx_drdy_int_cb(int pin, void *arg) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
-  LOG(LL_DEBUG, ("DRDY INT"));
+  // LOG(LL_DEBUG, ("DRDY INT"));
   if (c->phase != ISM43XXX_PHASE_RESET && c->phase != ISM43XXX_PHASE_INIT) {
     ism43xxx_state_cb(arg);
   }
