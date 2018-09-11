@@ -25,6 +25,7 @@ struct ism43xxx_socket_ctx {
   struct mg_connection *nc;
   const struct ism43xxx_cmd *cur_seq;
   struct mbuf rx_buf;
+  struct mbuf tx_buf;
 };
 
 struct ism43xxx_if_ctx {
@@ -175,38 +176,42 @@ static bool data_send_done_cb(struct ism43xxx_ctx *c,
   if (!ism43xxx_if_socket_verify_seq(sctx, cmd)) return true;
   sctx->cur_seq = NULL;
   ok = ok && (p.p[0] != '-');
-  if (!ok) {
-    LOG(LL_ERROR, ("Send error (%.*s)", (int) p.len - 2, p.p));
-    sctx->nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+  if (ok) {
+    LOG(LL_DEBUG,
+        ("%p %d -> %d", sctx->nc, sctx->nc->sock, (int) sctx->tx_buf.len));
+    // mg_hexdumpf(stderr, sctx->tx_buf.buf, sctx->tx_buf.len);
+    mbuf_free(&sctx->tx_buf);
+    mbuf_init(&sctx->tx_buf, 0);
   }
   (void) c;
   return true;
+}
+
+static bool ism43xxx_if_send_data(struct ism43xxx_socket_ctx *sctx) {
+  if (sctx->cur_seq != NULL || sctx->tx_buf.len == 0) return 0;
+  struct mg_connection *nc = sctx->nc;
+  size_t len = sctx->tx_buf.len;
+  const struct ism43xxx_cmd send_seq[] = {
+      {.cmd = asp("P0=%d", nc->sock), .free = true},
+      {.cmd = asp("S3=%d\r", (int) len), .free = true, .cont = true},
+      {.cmd = sctx->tx_buf.buf,
+       .len = len,
+       .free = false,
+       .ph = data_send_done_cb,
+       .user_data = sctx},
+      {.cmd = NULL},
+  };
+  return ism43xxx_if_socket_send_seq(sctx, send_seq, true /* copy */);
 }
 
 static int ism43xxx_if_send(struct mg_connection *nc, const void *buf,
                             size_t len) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
   struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
-  if (sctx->cur_seq != NULL) return 0;
-  len = MIN(len, 1200);
-  char *data = malloc(len);
-  if (data == NULL) return -2;
-  memcpy(data, buf, len);
-  const struct ism43xxx_cmd send_seq[] = {
-      {.cmd = asp("P0=%d", nc->sock), .free = true},
-      {.cmd = asp("S3=%d\r", (int) len), .free = true, .cont = true},
-      {.cmd = data,
-       .len = len,
-       .free = true,
-       .ph = data_send_done_cb,
-       .user_data = sctx},
-      {.cmd = NULL},
-  };
-  LOG(LL_DEBUG, ("%p -> %d %d", nc, nc->sock, (int) len));
-  // mg_hexdumpf(stderr, data, len);
-  return (ism43xxx_if_socket_send_seq(sctx, send_seq, true /* copy */)
-              ? (int) len
-              : -1);
+  if (sctx->cur_seq != NULL || sctx->tx_buf.len > 0) return 0;
+  mbuf_append(&sctx->tx_buf, buf, len);
+  if (sctx->tx_buf.len != len) return -2;
+  return (ism43xxx_if_send_data(sctx) ? (int) len : -1);
 }
 
 static int ism43xxx_if_tcp_send(struct mg_connection *nc, const void *buf,
@@ -228,7 +233,7 @@ int ism43xxx_if_tcp_recv(struct mg_connection *nc, void *buf, size_t len) {
     memcpy(buf, sctx->rx_buf.buf, len);
     mbuf_remove(&sctx->rx_buf, len);
     mbuf_trim(&sctx->rx_buf);
-    LOG(LL_DEBUG, ("%p <- %d", nc, (int) len));
+    LOG(LL_DEBUG, ("%p %d <- %d", nc, nc->sock, (int) len));
     // mg_hexdumpf(stderr, buf, len);
   }
   return len;
@@ -265,6 +270,7 @@ static void ism43xxx_if_init(struct mg_iface *iface) {
       (struct ism43xxx_if_ctx *) calloc(1, sizeof(*ctx));
   for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     mbuf_init(&ctx->sockets[i].rx_buf, 0);
+    mbuf_init(&ctx->sockets[i].tx_buf, 0);
   }
   iface->data = ctx;
 }
@@ -316,6 +322,7 @@ static void ism43xxx_if_remove_conn(struct mg_connection *nc) {
   sctx->nc = NULL;
   nc->sock = INVALID_SOCKET;
   mbuf_free(&sctx->rx_buf);
+  mbuf_free(&sctx->tx_buf);
 }
 
 static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
@@ -418,8 +425,10 @@ static time_t ism43xxx_if_poll(struct mg_iface *iface, int timeout_ms) {
     if (nc->sock == INVALID_SOCKET) continue;
     struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
     struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
-    if (sctx->cur_seq == NULL) {
+    if (sctx->tx_buf.len == 0) {
       mg_if_can_send_cb(nc);
+    } else {
+      ism43xxx_if_send_data(sctx);
     }
   }
   (void) timeout_ms;
