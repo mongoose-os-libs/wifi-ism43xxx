@@ -61,7 +61,7 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
   if (!ok) return false;
   /* Mark clients that are still connected. */
   int gen = 0;
-  for (int i = 0; i < ARRAY_SIZE(c->ap_clients); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(c->ap_clients); i++) {
     gen = MAX(gen, c->ap_clients[i].gen);
   }
   if (++gen == 0) ++gen;
@@ -81,7 +81,7 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
     ci->rssi = strtol(s.p, NULL, 10);
     if (ci->rssi >= 0) continue;
     ci->gen = gen;
-    for (int i = 0; i < ARRAY_SIZE(c->ap_clients); i++) {
+    for (int i = 0; i < (int) ARRAY_SIZE(c->ap_clients); i++) {
       if (memcmp(c->ap_clients[i].mac, ap_clients[n].mac,
                  sizeof(ap_clients[n].mac)) == 0) {
         c->ap_clients[i].rssi = ci->rssi;
@@ -93,7 +93,7 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
     if (ci->gen != 0) n++;
   }
   /* Sweep away clients that are gone. */
-  for (int i = 0; i < ARRAY_SIZE(c->ap_clients); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(c->ap_clients); i++) {
     struct ism43xxx_client_info *ci = &c->ap_clients[i];
     if (ci->gen == 0 || ci->gen == gen) continue;
     struct mgos_wifi_ap_sta_disconnected_arg arg;
@@ -105,7 +105,7 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
   /* Add new clients */
   for (int i = 0; i < n; i++) {
     struct ism43xxx_client_info *ci = &ap_clients[i];
-    for (int j = 0; i < ARRAY_SIZE(c->ap_clients); j++) {
+    for (int j = 0; i < (int) ARRAY_SIZE(c->ap_clients); j++) {
       if (c->ap_clients[j].gen == 0) {
         memcpy(&c->ap_clients[j], ci, sizeof(c->ap_clients[j]));
         struct mgos_wifi_ap_sta_connected_arg arg;
@@ -138,6 +138,7 @@ static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c,
   } else {
     LOG(LL_INFO, ("AP failed to start: %.*s", (int) payload.len, payload.p));
   }
+  (void) c;
   (void) cmd;
   return ok;
 }
@@ -222,6 +223,7 @@ static bool ism43xxx_pre_c0_cb(struct ism43xxx_ctx *c,
   LOG(LL_INFO, ("STA connecting..."));
   (void) c;
   (void) cmd;
+  (void) ok;
   (void) p;
   return true;
 }
@@ -297,6 +299,7 @@ static bool ism43xxx_cd_cb(struct ism43xxx_ctx *c,
     ism43xxx_set_sta_status(c, false /* connected */, false /* force */);
   }
   (void) cmd;
+  (void) p;
   return ok;
 }
 

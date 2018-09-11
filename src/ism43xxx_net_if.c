@@ -48,7 +48,10 @@ static bool ism43xxx_if_find_free_socket(struct ism43xxx_if_ctx *ctx,
     ctx->ism_ctx->if_disconnect_cb = ism43xxx_core_disconnect;
     ctx->ism_ctx->if_cb_arg = ctx;
   }
-  for (int i = 0; i < ARRAY_SIZE(ctx->sockets); i++) {
+  if (ctx->ism_ctx->mode == ISM43XXX_MODE_STA && !ctx->ism_ctx->sta_connected) {
+    return false;
+  }
+  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     if (ctx->sockets[i].nc == NULL ||
         (ctx->sockets[i].nc->flags & MG_F_CLOSE_IMMEDIATELY)) {
       LOG(LL_DEBUG, ("%p assigned sock %d", nc, i));
@@ -99,13 +102,18 @@ static bool connect_seq_done_cb(struct ism43xxx_ctx *c,
   sctx->cur_seq = NULL;
   struct mg_connection *nc = sctx->nc;
   if (nc != NULL) mg_if_connect_cb(nc, (ok ? 0 : -1));
+  (void) c;
+  (void) p;
   return true;
 }
 
 static void ism43xxx_if_connect(struct mg_connection *nc, int proto,
                                 int max_read_size) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
-  if (!ism43xxx_if_find_free_socket(ctx, nc)) return;
+  if (!ism43xxx_if_find_free_socket(ctx, nc)) {
+    mg_if_connect_cb(nc, -2);
+    return;
+  }
   LOG(LL_DEBUG, ("%p %d %s", nc, nc->sock, (proto ? "TCP" : "UDP")));
   char addr_buf[16];
   struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
@@ -126,12 +134,13 @@ static void ism43xxx_if_connect(struct mg_connection *nc, int proto,
   };
   if (!ism43xxx_if_socket_send_seq(sctx, udp_client_setup_seq,
                                    true /* copy */)) {
-    mg_if_connect_cb(nc, -2);
+    mg_if_connect_cb(nc, -3);
   }
 }
 
 static void ism43xxx_if_connect_tcp(struct mg_connection *nc,
                                     const union socket_address *sa) {
+  (void) sa;
   ism43xxx_if_connect(nc, 0 /* TCP */, ISM43XXX_MAX_UDP_IO_SIZE);
 }
 
@@ -145,6 +154,7 @@ static int ism43xxx_if_listen_tcp(struct mg_connection *nc,
    * XXX: We pretend listen succeeded but don't actually do anything.
    * TODO(rojer): Implement.
    */
+  (void) nc;
   (void) sa;
   return 0;
 }
@@ -169,6 +179,7 @@ static bool data_send_done_cb(struct ism43xxx_ctx *c,
     LOG(LL_ERROR, ("Send error (%.*s)", (int) p.len - 2, p.p));
     sctx->nc->flags |= MG_F_CLOSE_IMMEDIATELY;
   }
+  (void) c;
   return true;
 }
 
@@ -193,8 +204,9 @@ static int ism43xxx_if_send(struct mg_connection *nc, const void *buf,
   };
   LOG(LL_DEBUG, ("%p -> %d %d", nc, nc->sock, (int) len));
   // mg_hexdumpf(stderr, data, len);
-  return (ism43xxx_if_socket_send_seq(sctx, send_seq, true /* copy */) ? len
-                                                                       : -1);
+  return (ism43xxx_if_socket_send_seq(sctx, send_seq, true /* copy */)
+              ? (int) len
+              : -1);
 }
 
 static int ism43xxx_if_tcp_send(struct mg_connection *nc, const void *buf,
@@ -251,7 +263,7 @@ static void ism43xxx_if_sock_set(struct mg_connection *c, sock_t sock) {
 static void ism43xxx_if_init(struct mg_iface *iface) {
   struct ism43xxx_if_ctx *ctx =
       (struct ism43xxx_if_ctx *) calloc(1, sizeof(*ctx));
-  for (int i = 0; i < ARRAY_SIZE(ctx->sockets); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     mbuf_init(&ctx->sockets[i].rx_buf, 0);
   }
   iface->data = ctx;
@@ -280,6 +292,9 @@ static bool close_seq_done_cb(struct ism43xxx_ctx *c,
   if (!ism43xxx_if_socket_verify_seq(sctx, cmd)) return true;
   sctx->cur_seq = NULL;
   /* Nothing further to do. */
+  (void) c;
+  (void) ok;
+  (void) p;
   return true;
 }
 
@@ -325,6 +340,7 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
     mbuf_append(&sctx->rx_buf, p.p, p.len);
     mg_if_can_recv_cb(nc);
   }
+  (void) ok;
   return true;
 }
 
@@ -333,13 +349,16 @@ static bool ism43xxx_poll_done(struct ism43xxx_ctx *c,
                                struct mg_str p) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) cmd->user_data;
   ctx->cur_poll_seq = NULL;
+  (void) c;
+  (void) ok;
+  (void) p;
   return true;
 }
 
 static void ism43xxx_core_disconnect(void *arg) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
   LOG(LL_DEBUG, ("disconnect"));
-  for (int i = 0; i < ARRAY_SIZE(ctx->sockets); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
     if (sctx->nc == NULL) continue;
     sctx->nc->flags |= MG_F_CLOSE_IMMEDIATELY;
@@ -357,7 +376,7 @@ static void ism43xxx_core_data_poll(void *arg) {
       (ARRAY_SIZE(ctx->sockets) * 2) + 1, sizeof(*poll_seq));
   if (poll_seq == NULL) return;
   int j = 0;
-  for (int i = 0; i < ARRAY_SIZE(ctx->sockets); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
     if (sctx->nc == NULL) continue;
     if (sctx->nc->flags & MG_F_LISTENING) {

@@ -113,6 +113,7 @@ struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
   }
   res.p = end + sizeof(ISM43XXX_ASYNC_RESP_END) - 1;
   res.len = (p.p + p.len) - res.p;
+  (void) c;
   return res;
 }
 
@@ -121,6 +122,7 @@ bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd,
   if (!ok) return false;
   c->polling = false;
   (void) cmd;
+  (void) p;
   return true;
 }
 
@@ -227,7 +229,7 @@ const struct ism43xxx_cmd *ism43xxx_send_seq(struct ism43xxx_ctx *c,
     seq_copy[cmd - seq].free = true;
     seq = seq_copy;
   }
-  for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(c->seq_q); i++) {
     if (c->seq_q[i] == NULL) {
       c->seq_q[i] = seq;
       if (i == 0) {
@@ -255,10 +257,10 @@ static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
   const struct ism43xxx_cmd *seq = *seqp;
   if (seq == NULL) return ok;
   bool found = false;
-  for (int i = 0; i < ARRAY_SIZE(c->seq_q); i++) {
+  for (int i = 0; i < (int) ARRAY_SIZE(c->seq_q); i++) {
     if (c->seq_q[i] == seq) {
       c->seq_q[i] = NULL;
-      if (i < ARRAY_SIZE(c->seq_q) - 1) {
+      if (i < (int) ARRAY_SIZE(c->seq_q) - 1) {
         memmove(c->seq_q + i, c->seq_q + i + 1,
                 (ARRAY_SIZE(c->seq_q) - i - 1) * sizeof(c->seq_q[0]));
       }
@@ -389,7 +391,12 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
       mbuf_remove(rxb, 1);
     }
   }
-  LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d)", (int) rx_len, (int) rxb->len));
+  LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d) %d", (int) rx_len, (int) rxb->len,
+                         mgos_gpio_read(c->drdy_gpio)));
+  /* Workaround */
+  if (rxb->len == 0 && mgos_gpio_read(c->drdy_gpio)) {
+    mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
+  }
   return (rxb->len > 0);
 }
 
@@ -561,7 +568,7 @@ static void ism43xxx_state_cb(void *arg) {
 
 static void ism43xxx_drdy_int_cb(int pin, void *arg) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
-  // LOG(LL_DEBUG, ("DRDY INT"));
+  LOG(LL_DEBUG, ("DRDY INT"));
   if (c->phase != ISM43XXX_PHASE_RESET && c->phase != ISM43XXX_PHASE_INIT) {
     ism43xxx_state_cb(arg);
   }
