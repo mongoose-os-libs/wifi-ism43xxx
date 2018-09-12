@@ -26,6 +26,7 @@ struct ism43xxx_socket_ctx {
   const struct ism43xxx_cmd *cur_seq;
   struct mbuf rx_buf;
   struct mbuf tx_buf;
+  bool poll_with_empty;
 };
 
 struct ism43xxx_if_ctx {
@@ -63,6 +64,7 @@ static void ism43xxx_socket_assign(struct ism43xxx_if_ctx *ctx,
        ((nc->flags & MG_F_UDP) ? "UDP" : "TCP"), i));
   nc->sock = i;
   sctx->nc = nc;
+  sctx->poll_with_empty = true;
 }
 
 /* Verify that the sequence that completed was not superseded. */
@@ -214,9 +216,9 @@ static int ism43xxx_if_listen_udp(struct mg_connection *nc,
   return -1;
 }
 
-static bool data_send_done_cb(struct ism43xxx_ctx *c,
-                              const struct ism43xxx_cmd *cmd, bool ok,
-                              struct mg_str p) {
+static bool ism43xxx_data_send_done_cb(struct ism43xxx_ctx *c,
+                                       const struct ism43xxx_cmd *cmd, bool ok,
+                                       struct mg_str p) {
   struct ism43xxx_socket_ctx *sctx =
       (struct ism43xxx_socket_ctx *) cmd->user_data;
   if (!ism43xxx_socket_verify_seq(sctx, cmd)) return true;
@@ -228,6 +230,7 @@ static bool data_send_done_cb(struct ism43xxx_ctx *c,
     // mg_hexdumpf(stderr, sctx->tx_buf.buf, sctx->tx_buf.len);
     mbuf_free(&sctx->tx_buf);
     mbuf_init(&sctx->tx_buf, 0);
+    sctx->poll_with_empty = true;
   }
   (void) c;
   return true;
@@ -237,17 +240,17 @@ static bool ism43xxx_if_send_data(struct ism43xxx_socket_ctx *sctx) {
   if (sctx->cur_seq != NULL || sctx->tx_buf.len == 0) return 0;
   struct mg_connection *nc = sctx->nc;
   size_t len = sctx->tx_buf.len;
-  const struct ism43xxx_cmd send_seq[] = {
+  const struct ism43xxx_cmd send_data_seq[] = {
       {.cmd = asp("P0=%d", nc->sock), .free = true},
       {.cmd = asp("S3=%d\r", (int) len), .free = true, .cont = true},
       {.cmd = sctx->tx_buf.buf,
        .len = len,
        .free = false,
-       .ph = data_send_done_cb,
+       .ph = ism43xxx_data_send_done_cb,
        .user_data = sctx},
       {.cmd = NULL},
   };
-  return ism43xxx_socket_send_seq(sctx, send_seq, true /* copy */);
+  return ism43xxx_socket_send_seq(sctx, send_data_seq, true /* copy */);
 }
 
 static int ism43xxx_if_send(struct mg_connection *nc, const void *buf,
@@ -446,17 +449,33 @@ static time_t ism43xxx_if_poll(struct mg_iface *iface, int timeout_ms) {
     tmp = nc->next;
     if (nc->iface != iface) continue;
     mg_if_poll(nc, now);
+    unsigned long flags = nc->flags;
     if (nc->sock != INVALID_SOCKET) {
       struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
       struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
       if (sctx->tx_buf.len == 0) {
-        mg_if_can_send_cb(nc);
+        bool want_poll = false;
+        if (flags & MG_F_WANT_WRITE) {
+          want_poll = true;
+        } else if (flags & MG_F_SSL) {
+          if (flags & MG_F_SSL_HANDSHAKE_DONE) {
+            want_poll = (nc->send_mbuf.len > 0);
+          }
+        } else if (nc->send_mbuf.len > 0) {
+          want_poll = true;
+        } else if (sctx->poll_with_empty) {
+          want_poll = true;
+          sctx->poll_with_empty = false;
+        }
+        if (want_poll) {
+          mg_if_can_send_cb(nc);
+        }
       } else {
         ism43xxx_if_send_data(sctx);
       }
-    } else if (!(nc->flags & MG_F_CLOSE_IMMEDIATELY)) {
+    } else if (!(flags & MG_F_CLOSE_IMMEDIATELY)) {
       /* Retry pending UDP connections. */
-      if ((nc->flags & MG_F_UDP) && (nc->flags & MG_F_CONNECTING)) {
+      if ((flags & MG_F_UDP) && (flags & MG_F_CONNECTING)) {
         ism43xxx_if_connect_udp(nc);
       }
     }
