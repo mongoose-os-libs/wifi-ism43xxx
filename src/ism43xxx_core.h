@@ -46,7 +46,6 @@ enum ism43xxx_phase {
   ISM43XXX_PHASE_INIT = 1,
   ISM43XXX_PHASE_CMD = 2,
   ISM43XXX_PHASE_RESP = 3,
-  ISM43XXX_PHASE_DATA = 4,
 };
 
 enum ism43xxx_mode {
@@ -97,6 +96,7 @@ struct ism43xxx_ctx {
   unsigned int print_mac : 1;
   unsigned int print_info : 1;
   unsigned int sta_connected : 1;
+  unsigned int ap_running : 1;
 
   void (*if_disconnect_cb)(void *arg);
   void (*if_data_poll_cb)(void *arg);

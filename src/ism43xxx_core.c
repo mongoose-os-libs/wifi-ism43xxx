@@ -333,6 +333,7 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
   ism43xxx_set_sta_status(c, false /* connected */,
                           (c->mode == ISM43XXX_MODE_STA) /* force */);
   if (c->if_disconnect_cb != NULL) c->if_disconnect_cb(c->if_cb_arg);
+  c->ap_running = false;
   c->idle_timeout = 0;
   c->cur_cmd_timeout = 0;
   c->mode = ISM43XXX_MODE_IDLE;
@@ -377,7 +378,6 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
     rx_len += 2;
     if (rx_len > 1500) {
       LOG(LL_ERROR, ("Runaway Rx, reset"));
-      mg_hexdumpf(stderr, rxb->buf, rxb->len);
       ism43xxx_reset(c, true /* hold */);
       return false;
     }
@@ -542,13 +542,6 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
         }
       }
       c->phase = ISM43XXX_PHASE_CMD;
-      break;
-    }
-    case ISM43XXX_PHASE_DATA: {
-      if (drdy) {
-        /* We do not trim raw data, NAK char may actually be payload. */
-        if (!ism43xxx_rx_data(c, rxb, false /* trim */)) break;
-      }
       break;
     }
   }

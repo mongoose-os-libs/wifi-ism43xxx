@@ -112,7 +112,7 @@ static bool ism43xxx_socket_find_free(struct ism43xxx_if_ctx *ctx,
     ctx->ism_ctx->if_disconnect_cb = ism43xxx_core_disconnect;
     ctx->ism_ctx->if_cb_arg = ctx;
   }
-  if (ctx->ism_ctx->mode == ISM43XXX_MODE_STA && !ctx->ism_ctx->sta_connected) {
+  if (!ctx->ism_ctx->sta_connected && !ctx->ism_ctx->ap_running) {
     return false;
   }
   if ((nc->flags & MG_F_UDP)) {
@@ -155,17 +155,10 @@ static bool connect_seq_done_cb(struct ism43xxx_ctx *c,
   return true;
 }
 
-static void ism43xxx_if_connect(struct mg_connection *nc, int proto,
+static bool ism43xxx_if_connect(struct mg_connection *nc, int proto,
                                 int max_read_size) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
-  if (!ism43xxx_socket_find_free(ctx, nc)) {
-    if ((nc->flags & MG_F_UDP)) {
-      /* UDP will be retried, assumption being that they are transient. */
-    } else {
-      mg_if_connect_cb(nc, -2);
-    }
-    return;
-  }
+  if (!ism43xxx_socket_find_free(ctx, nc)) return false;
   char addr_buf[16];
   struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
   const struct ism43xxx_cmd udp_client_setup_seq[] = {
@@ -181,19 +174,26 @@ static void ism43xxx_if_connect(struct mg_connection *nc, int proto,
       {.cmd = "P6=1"},   /* Start client */
       {.cmd = NULL, .ph = connect_seq_done_cb, .user_data = sctx},
   };
-  if (!ism43xxx_socket_send_seq(sctx, udp_client_setup_seq, true /* copy */)) {
-    mg_if_connect_cb(nc, -4);
-  }
+  return ism43xxx_socket_send_seq(sctx, udp_client_setup_seq, true /* copy */);
 }
 
 static void ism43xxx_if_connect_tcp(struct mg_connection *nc,
                                     const union socket_address *sa) {
   (void) sa;
-  ism43xxx_if_connect(nc, 0 /* TCP */, ISM43XXX_MAX_TCP_IO_SIZE);
+  if (!ism43xxx_if_connect(nc, 0 /* TCP */, ISM43XXX_MAX_TCP_IO_SIZE)) {
+    mg_if_connect_cb(nc, -2);
+  }
 }
 
 static void ism43xxx_if_connect_udp(struct mg_connection *nc) {
-  ism43xxx_if_connect(nc, 1 /* UDP */, ISM43XXX_MAX_UDP_IO_SIZE);
+  if (!ism43xxx_if_connect(nc, 1 /* UDP */, ISM43XXX_MAX_UDP_IO_SIZE)) {
+    struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
+    if (!ctx->ism_ctx->sta_connected && !ctx->ism_ctx->ap_running) {
+      mg_if_connect_cb(nc, -2);
+    } else {
+      /* We'll try later. */
+    }
+  }
 }
 
 static int ism43xxx_if_listen_tcp(struct mg_connection *nc,

@@ -133,6 +133,7 @@ static bool ism43xxx_pre_ad_cb(struct ism43xxx_ctx *c,
 static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c,
                            const struct ism43xxx_cmd *cmd, bool ok,
                            struct mg_str payload) {
+  c->ap_running = ok;
   if (ok) {
     LOG(LL_INFO, ("AP started"));
   } else {
