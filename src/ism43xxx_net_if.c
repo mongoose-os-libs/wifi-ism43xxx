@@ -225,7 +225,7 @@ static bool ism43xxx_data_send_done_cb(struct ism43xxx_ctx *c,
   sctx->cur_seq = NULL;
   ok = ok && (p.p[0] != '-');
   if (ok) {
-    LOG(LL_DEBUG,
+    LOG(LL_VERBOSE_DEBUG,
         ("%p %d -> %d", sctx->nc, sctx->nc->sock, (int) sctx->tx_buf.len));
     // mg_hexdumpf(stderr, sctx->tx_buf.buf, sctx->tx_buf.len);
     mbuf_free(&sctx->tx_buf);
@@ -282,7 +282,7 @@ int ism43xxx_if_tcp_recv(struct mg_connection *nc, void *buf, size_t len) {
     memcpy(buf, sctx->rx_buf.buf, len);
     mbuf_remove(&sctx->rx_buf, len);
     mbuf_trim(&sctx->rx_buf);
-    LOG(LL_DEBUG, ("%p %d <- %d", nc, nc->sock, (int) len));
+    LOG(LL_VERBOSE_DEBUG, ("%p %d <- %d", nc, nc->sock, (int) len));
     // mg_hexdumpf(stderr, buf, len);
   }
   return len;
@@ -355,22 +355,20 @@ static void ism43xxx_if_remove_conn(struct mg_connection *nc) {
 static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
                            const struct ism43xxx_cmd *cmd, bool ok,
                            struct mg_str p) {
-  if (!ok) return true;
   struct ism43xxx_socket_ctx *sctx =
       (struct ism43xxx_socket_ctx *) cmd->user_data;
   struct mg_connection *nc = sctx->nc;
   if (nc == NULL) return true;
+  if (!ok) {
+    LOG(LL_ERROR,
+        ("%p %d read error %.*s", nc, nc->sock, (int) p.len - 2, p.p));
+    nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+    return true;
+  }
   p = ism43xxx_process_async_ev(c, p);
   if (p.len > 0) {
     p.len -= 2; /* \r\n at the end */
-                /* And if legitimate data packet happens to be "-1"?
-                 * Well, sucks to be you then, I guess. */
-    if (p.len == 2 && mg_vcmp(&p, "-1") == 0) {
-      LOG(LL_ERROR, ("%p %d read error", nc, nc->sock));
-      nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-      return true;
-    }
-    LOG(LL_DEBUG, ("<- %d", (int) p.len));
+    // LOG(LL_DEBUG, ("<- %d", (int) p.len));
     // mg_hexdumpf(stderr, p.p, p.len);
     mbuf_append(&sctx->rx_buf, p.p, p.len);
     mg_if_can_recv_cb(nc);

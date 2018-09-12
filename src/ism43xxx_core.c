@@ -235,7 +235,7 @@ const struct ism43xxx_cmd *ism43xxx_send_seq(struct ism43xxx_ctx *c,
       if (i == 0) {
         ism43xxx_send_next_seq(c);
       } else {
-        LOG(LL_DEBUG, ("enq seq %p (%s) @ %d", seq, seq->cmd, i));
+        LOG(LL_VERBOSE_DEBUG, ("enq seq %p (%s) @ %d", seq, seq->cmd, i));
       }
       return seq;
     }
@@ -248,7 +248,7 @@ static void ism43xxx_send_next_seq(struct ism43xxx_ctx *c) {
   if (c->cur_cmd != NULL) return;
   c->cur_cmd = c->seq_q[0];
   if (c->cur_cmd == NULL) return;
-  LOG(LL_DEBUG, ("sending seq %p (%s)", c->cur_cmd, c->cur_cmd->cmd));
+  LOG(LL_VERBOSE_DEBUG, ("sending seq %p (%s)", c->cur_cmd, c->cur_cmd->cmd));
   mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
 }
 
@@ -272,7 +272,7 @@ static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
   if (!found) {
     *seqp = NULL;
   }
-  LOG(LL_DEBUG, ("free seq %p", seq));
+  LOG(LL_VERBOSE_DEBUG, ("free seq %p", seq));
   const struct ism43xxx_cmd *cmd = seq;
   while (cmd->cmd != NULL) {
     if (cmd->free) free((void *) cmd->cmd);
@@ -287,7 +287,7 @@ static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
 
 void ism43xxx_abort_seq(struct ism43xxx_ctx *c,
                         const struct ism43xxx_cmd **seq) {
-  if (*seq) LOG(LL_DEBUG, ("abort seq %p", *seq));
+  if (*seq) LOG(LL_VERBOSE_DEBUG, ("abort seq %p", *seq));
   ism43xxx_free_seq(c, seq, false /* ok */);
 }
 
@@ -436,7 +436,6 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
     case ISM43XXX_PHASE_CMD: {
       if (!drdy) break; /* In this case DRDY means "ready for command". */
       if (c->need_poll && !c->polling) {
-        LOG(LL_DEBUG, ("poll %d", (int) mgos_get_free_heap_size()));
         c->need_poll = false;
         c->polling = true;
         switch (c->mode) {
@@ -449,7 +448,6 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
           case ISM43XXX_MODE_IDLE:
             ism43xxx_send_seq(c, ism43xxx_poll_seq, false /* copy */);
             if (c->idle_timeout <= 0 && c->rst_gpio >= 0) {
-              LOG(LL_DEBUG, ("Module is idle, suspending"));
               ism43xxx_reset(c, true /* hold */);
               return;
             }
@@ -561,7 +559,7 @@ static void ism43xxx_state_cb(void *arg) {
 
 static void ism43xxx_drdy_int_cb(int pin, void *arg) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
-  LOG(LL_DEBUG, ("DRDY INT"));
+  LOG(LL_VERBOSE_DEBUG, ("DRDY INT"));
   if (c->phase != ISM43XXX_PHASE_RESET && c->phase != ISM43XXX_PHASE_INIT) {
     ism43xxx_state_cb(arg);
   }
