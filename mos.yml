@@ -49,5 +49,6 @@ tags:
   - c
   - hw
   - wifi
+  - docs:drivers:Inventek ISM43xxx WiFi
 
 manifest_version: 2018-08-29
