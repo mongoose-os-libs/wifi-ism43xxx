@@ -366,9 +366,10 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
     return true;
   }
   p = ism43xxx_process_async_ev(c, p);
-  if (p.len > 0) {
-    p.len -= 2; /* \r\n at the end */
-    // LOG(LL_DEBUG, ("<- %d", (int) p.len));
+  if (p.len > 2) {
+    p.len -= 2; /* Remove \r\n at the end */
+    LOG(LL_VERBOSE_DEBUG,
+        ("%p %d <- %d", sctx->nc, sctx->nc->sock, (int) p.len));
     // mg_hexdumpf(stderr, p.p, p.len);
     mbuf_append(&sctx->rx_buf, p.p, p.len);
     mg_if_can_recv_cb(nc);

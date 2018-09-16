@@ -453,7 +453,7 @@ bool mgos_wifi_dev_start_scan(void) {
 }
 
 void mgos_wifi_dev_deinit(void) {
-  ism43xxx_reset(s_ctx, true /* hold */);
+  if (s_ctx != NULL) ism43xxx_reset(s_ctx, true /* hold */);
 }
 
 bool mgos_wifi_ism43xxx_init(void) {

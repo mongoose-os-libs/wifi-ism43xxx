@@ -490,13 +490,8 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
         break;
       }
       const struct mg_str sep = mg_mk_str(ISM43XXX_LINE_SEP);
-      struct mg_str buf = mg_mk_str_n(rxb->buf, rxb->len);
-      /* Most of the commands send leading \r\n but some don't ("PS").
-       * Align the start */
-      while (buf.len > 0 && (*buf.p == '\r' || *buf.p == '\n')) {
-        buf.p++;
-        buf.len--;
-      }
+      /* Remove \r\n at the beginning */
+      struct mg_str buf = mg_mk_str_n(rxb->buf + 2, rxb->len - 2);
       struct mg_str s = buf, line;
       while (s.len > 0) {
         const char *eol = mg_strstr(s, sep);
