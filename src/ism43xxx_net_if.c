@@ -24,6 +24,7 @@
 struct ism43xxx_socket_ctx {
   struct mg_connection *nc;
   const struct ism43xxx_cmd *cur_seq;
+  struct mg_str rx_p;
   struct mbuf rx_buf;
   struct mbuf tx_buf;
   bool poll_with_empty;
@@ -170,7 +171,7 @@ static bool ism43xxx_if_connect(struct mg_connection *nc, int proto,
        .free = true},
       {.cmd = asp("P4=%u", ntohs(nc->sa.sin.sin_port)), .free = true},
       {.cmd = asp("R1=%d", max_read_size), .free = true},
-      {.cmd = "R2=200"}, /* Non-blocking reads */
+      {.cmd = "R2=1"},   /* Non-blocking reads */
       {.cmd = "S2=500"}, /* Allow 500 ms to send a packet */
       {.cmd = "R3=0"},   /* Do not remove CRLF from data */
       {.cmd = "P6=1"},   /* Start client */
@@ -277,15 +278,21 @@ int ism43xxx_if_tcp_recv(struct mg_connection *nc, void *buf, size_t len) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
   if (nc->sock == INVALID_SOCKET) return -1;
   struct ism43xxx_socket_ctx *sctx = &ctx->sockets[nc->sock];
-  len = MIN(len, sctx->rx_buf.len);
-  if (len > 0) {
-    memcpy(buf, sctx->rx_buf.buf, len);
-    mbuf_remove(&sctx->rx_buf, len);
+  size_t rx_len = 0;
+  if ((rx_len = MIN(len, sctx->rx_buf.len)) > 0) {
+    memcpy(buf, sctx->rx_buf.buf, rx_len);
+    mbuf_remove(&sctx->rx_buf, rx_len);
     mbuf_trim(&sctx->rx_buf);
-    LOG(LL_VERBOSE_DEBUG, ("%p %d <- %d", nc, nc->sock, (int) len));
-    // mg_hexdumpf(stderr, buf, len);
+  } else if ((rx_len = MIN(len, sctx->rx_p.len)) > 0) {
+    memcpy(buf, sctx->rx_p.p, rx_len);
+    sctx->rx_p.p += rx_len;
+    sctx->rx_p.len -= rx_len;
   }
-  return len;
+  if (rx_len > 0) {
+    LOG(LL_VERBOSE_DEBUG, ("%p %d <- %d", nc, nc->sock, (int) rx_len));
+    // mg_hexdumpf(stderr, buf, rx_len);
+  }
+  return rx_len;
 }
 
 int ism43xxx_if_udp_recv(struct mg_connection *nc, void *buf, size_t len,
@@ -365,15 +372,19 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
     nc->flags |= MG_F_CLOSE_IMMEDIATELY;
     return true;
   }
-  p = ism43xxx_process_async_ev(c, p);
-  if (p.len > 2) {
-    p.len -= 2; /* Remove \r\n at the end */
+  sctx->rx_p = ism43xxx_process_async_ev(c, p);
+  if (sctx->rx_p.len > 2) {
+    sctx->rx_p.len -= 2; /* Remove \r\n at the end */
     LOG(LL_VERBOSE_DEBUG,
-        ("%p %d <- %d", sctx->nc, sctx->nc->sock, (int) p.len));
-    // mg_hexdumpf(stderr, p.p, p.len);
-    mbuf_append(&sctx->rx_buf, p.p, p.len);
+        ("%p %d <- %d", sctx->nc, sctx->nc->sock, (int) sctx->rx_p.len));
+    // mg_hexdumpf(stderr, sctx->rx_p.p, sctx->rx_p.len);
     mg_if_can_recv_cb(nc);
+    if (sctx->rx_p.len > 0) {
+      mbuf_append(&sctx->rx_buf, sctx->rx_p.p, sctx->rx_p.len);
+    }
   }
+  sctx->rx_p.p = NULL;
+  sctx->rx_p.len = 0;
   return true;
 }
 
@@ -402,7 +413,6 @@ static void ism43xxx_core_disconnect(void *arg) {
 }
 
 static void ism43xxx_core_data_poll(void *arg) {
-  // LOG(LL_DEBUG, ("data poll"));
   struct ism43xxx_cmd *cmd;
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
   struct ism43xxx_cmd *poll_seq = (struct ism43xxx_cmd *) calloc(
@@ -412,10 +422,10 @@ static void ism43xxx_core_data_poll(void *arg) {
   for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
     if (sctx->nc == NULL) continue;
+    if (sctx->nc->flags & MG_F_CLOSE_IMMEDIATELY) continue;
     if (sctx->nc->flags & MG_F_LISTENING) {
       /* TODO(rojer) */
-    } else if ((sctx->nc->flags & (MG_F_CONNECTING | MG_F_CLOSE_IMMEDIATELY)) ==
-               0) {
+    } else if (!(sctx->nc->flags & MG_F_CONNECTING) && sctx->rx_buf.len == 0) {
       cmd = &poll_seq[j++];
       cmd->cmd = asp("P0=%d", i);
       cmd->free = true;
@@ -471,6 +481,9 @@ static time_t ism43xxx_if_poll(struct mg_iface *iface, int timeout_ms) {
         }
       } else {
         ism43xxx_if_send_data(sctx);
+      }
+      if (sctx->rx_buf.len > 0) {
+        mg_if_can_recv_cb(nc);
       }
     } else if (!(flags & MG_F_CLOSE_IMMEDIATELY)) {
       /* Retry pending UDP connections. */

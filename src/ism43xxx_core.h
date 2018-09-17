@@ -39,7 +39,7 @@ extern "C" {
 /* Maximum UDP read/write size. 1200 is the maximum supported by the module. */
 #define ISM43XXX_MAX_UDP_IO_SIZE 1200
 /* Maximum TCP read/write size. */
-#define ISM43XXX_MAX_TCP_IO_SIZE 512
+#define ISM43XXX_MAX_TCP_IO_SIZE 1024
 
 enum ism43xxx_phase {
   ISM43XXX_PHASE_RESET = 0,

@@ -462,7 +462,5 @@ bool mgos_wifi_ism43xxx_init(void) {
 }
 
 struct ism43xxx_ctx *ism43xxx_get_ctx(void) {
-  if (s_ctx == NULL) return NULL;
-  if (s_ctx->mode == ISM43XXX_MODE_IDLE) return false;
   return s_ctx;
 }

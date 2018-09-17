@@ -158,7 +158,6 @@ static void ism43xxx_send_cmd(struct ism43xxx_ctx *c,
     (*tot_len)++;
   }
   mgos_gpio_write(c->cs_gpio, 0);
-  mgos_usleep(15);
   while (cmd_len > 0) {
     size_t avail = sizeof(data) - data_len - 2 /* for \r and padding */;
     size_t len = MIN(avail, cmd_len);
@@ -212,6 +211,49 @@ static void ism43xxx_send_cmd(struct ism43xxx_ctx *c,
   if (!cmd->cont) mgos_gpio_write(c->cs_gpio, 1);
   c->cur_cmd_timeout =
       (cmd->timeout > 0 ? cmd->timeout : ISM43XXX_DEFAULT_CMD_TIMEOUT);
+}
+
+static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb) {
+  /* NB: Reads are always in 2 byte words (LE). */
+  uint16_t word;
+  size_t rx_len = 0;
+  struct mgos_spi_txn txn = {
+      .cs = -1,
+      .mode = 0,
+      .freq = c->spi_freq,
+      .fd.len = 2,
+      .fd.tx_data = &word,
+      .fd.rx_data = &word,
+  };
+  if (!mgos_gpio_read(c->drdy_gpio)) return false;
+  mgos_gpio_write(c->cs_gpio, 0);
+  mgos_usleep(15);
+  while (mgos_gpio_read(c->drdy_gpio)) {
+    word = (((uint16_t) ISM43XXX_PAD_OUT_CHAR) << 8) | ISM43XXX_PAD_OUT_CHAR;
+    if (!mgos_spi_run_txn(c->spi, true /* full_duplex */, &txn)) break;
+    word = ((word << 8) | (word >> 8)); /* Swap bytes */
+    mbuf_append(rxb, &word, 2);
+    rx_len += 2;
+    if (rx_len > 1200) {
+      LOG(LL_ERROR, ("Runaway Rx"));
+      ism43xxx_reset(c, true /* hold */);
+      return false;
+    }
+  }
+  mgos_gpio_write(c->cs_gpio, 1);
+  while (rxb->len > 0 && rxb->buf[rxb->len - 1] == ISM43XXX_PAD_IN_CHAR) {
+    rxb->len--;
+  }
+  while (rxb->len > 0 && rxb->buf[0] == ISM43XXX_PAD_IN_CHAR) {
+    mbuf_remove(rxb, 1);
+  }
+  LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d) %d", (int) rx_len, (int) rxb->len,
+                         mgos_gpio_read(c->drdy_gpio)));
+  /* Workaround */
+  if (rxb->len == 0 && mgos_gpio_read(c->drdy_gpio)) {
+    mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
+  }
+  return (rxb->len > 0);
 }
 
 static void ism43xxx_send_next_seq(struct ism43xxx_ctx *c);
@@ -354,52 +396,6 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
   }
 }
 
-static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb,
-                             bool trim_padding) {
-  /* NB: Reads are always in 2 byte words (LE). */
-  uint16_t word;
-  size_t rx_len = 0;
-  struct mgos_spi_txn txn = {
-      .cs = -1,
-      .mode = 0,
-      .freq = c->spi_freq,
-      .fd.len = 2,
-      .fd.tx_data = &word,
-      .fd.rx_data = &word,
-  };
-  if (!mgos_gpio_read(c->drdy_gpio)) return false;
-  mgos_gpio_write(c->cs_gpio, 0);
-  mgos_usleep(15);
-  while (mgos_gpio_read(c->drdy_gpio)) {
-    word = (((uint16_t) ISM43XXX_PAD_OUT_CHAR) << 8) | ISM43XXX_PAD_OUT_CHAR;
-    if (!mgos_spi_run_txn(c->spi, true /* full_duplex */, &txn)) break;
-    word = ((word << 8) | (word >> 8)); /* Swap bytes */
-    mbuf_append(rxb, &word, 2);
-    rx_len += 2;
-    if (rx_len > 1500) {
-      LOG(LL_ERROR, ("Runaway Rx, reset"));
-      ism43xxx_reset(c, true /* hold */);
-      return false;
-    }
-  }
-  mgos_gpio_write(c->cs_gpio, 1);
-  if (trim_padding) {
-    while (rxb->len > 0 && rxb->buf[rxb->len - 1] == ISM43XXX_PAD_IN_CHAR) {
-      rxb->len--;
-    }
-    while (rxb->len > 0 && rxb->buf[0] == ISM43XXX_PAD_IN_CHAR) {
-      mbuf_remove(rxb, 1);
-    }
-  }
-  LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d) %d", (int) rx_len, (int) rxb->len,
-                         mgos_gpio_read(c->drdy_gpio)));
-  /* Workaround */
-  if (rxb->len == 0 && mgos_gpio_read(c->drdy_gpio)) {
-    mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
-  }
-  return (rxb->len > 0);
-}
-
 static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
   bool drdy = mgos_gpio_read(c->drdy_gpio);
 
@@ -412,7 +408,7 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
       break;
     }
     case ISM43XXX_PHASE_INIT: {
-      if (!ism43xxx_rx_data(c, rxb, true /* trim */)) {
+      if (!ism43xxx_rx_data(c, rxb)) {
         break;
       }
       /* We must have received a prompt by now. If not, keep resetting. */
@@ -473,7 +469,7 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
     }
     case ISM43XXX_PHASE_RESP: {
       const struct ism43xxx_cmd *cmd = c->cur_cmd;
-      if (!ism43xxx_rx_data(c, rxb, true /* trim */)) {
+      if (!ism43xxx_rx_data(c, rxb)) {
         if (c->cur_cmd != NULL) {
           if (c->cur_cmd_timeout <= 0) {
             LOG(LL_ERROR, ("No response to '%s'", cmd->cmd));
@@ -500,9 +496,10 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
           s.p += line.len + sep.len;
           s.len -= line.len + sep.len;
           if (line.len == 0) continue;
-          LOG(LL_VERBOSE_DEBUG, ("<- %.*s", (int) line.len, line.p));
+          // LOG(LL_VERBOSE_DEBUG, ("<- %.*s", (int) line.len, line.p));
         } else if (mg_vcmp(&s, ISM43XXX_PROMPT) == 0) {
           /* Previous line is the status. */
+          // LOG(LL_INFO, ("<- %.*s", (int) line.len, line.p));
           bool ok = (mg_vcmp(&line, ISM43XXX_RESP_OK) == 0);
           if (cmd->ph != NULL) {
             const struct mg_str payload = mg_mk_str_n(buf.p, line.p - buf.p);
