@@ -240,6 +240,7 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb) {
       return false;
     }
   }
+  mgos_gpio_clear_int(c->drdy_gpio);
   mgos_gpio_write(c->cs_gpio, 1);
   while (rxb->len > 0 && rxb->buf[rxb->len - 1] == ISM43XXX_PAD_IN_CHAR) {
     rxb->len--;
@@ -249,10 +250,6 @@ static bool ism43xxx_rx_data(struct ism43xxx_ctx *c, struct mbuf *rxb) {
   }
   LOG(LL_VERBOSE_DEBUG, ("rx_len %d (tot %d) %d", (int) rx_len, (int) rxb->len,
                          mgos_gpio_read(c->drdy_gpio)));
-  /* Workaround */
-  if (rxb->len == 0 && mgos_gpio_read(c->drdy_gpio)) {
-    mgos_invoke_cb(ism43xxx_state_cb, c, false /* from_isr */);
-  }
   return (rxb->len > 0);
 }
 
