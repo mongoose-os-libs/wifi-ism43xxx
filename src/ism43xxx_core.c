@@ -326,7 +326,9 @@ static bool ism43xxx_free_seq(struct ism43xxx_ctx *c,
 
 void ism43xxx_abort_seq(struct ism43xxx_ctx *c,
                         const struct ism43xxx_cmd **seq) {
-  if (*seq) LOG(LL_VERBOSE_DEBUG, ("abort seq %p", *seq));
+  if (*seq) {
+    LOG(LL_VERBOSE_DEBUG, ("abort seq %p", *seq));
+  }
   ism43xxx_free_seq(c, seq, false /* ok */);
 }
 
@@ -389,7 +391,9 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
   } else {
     /* If we don't have the reset pin, module will boot but we'll ignore that
      * and start with another reset next time. */
-    if (c->rst_gpio >= 0) LOG(LL_DEBUG, ("Keeping the module in reset"));
+    if (c->rst_gpio >= 0) {
+      LOG(LL_DEBUG, ("Keeping the module in reset"));
+    }
   }
 }
 
@@ -596,6 +600,11 @@ bool ism43xxx_init(struct ism43xxx_ctx *c) {
   /* Perform init to query params and then stay in reset. */
   ism43xxx_reset(c, false /* hold */);
   res = true;
+  (void) b1;
+  (void) b2;
+  (void) b3;
+  (void) b4;
+  (void) b5;
 out:
   return res;
 }

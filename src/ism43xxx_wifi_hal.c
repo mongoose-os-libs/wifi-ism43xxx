@@ -141,6 +141,7 @@ static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c,
   }
   (void) c;
   (void) cmd;
+  (void) payload;
   return ok;
 }
 

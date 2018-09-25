@@ -66,6 +66,7 @@ static void ism43xxx_socket_assign(struct ism43xxx_if_ctx *ctx,
   nc->sock = i;
   sctx->nc = nc;
   sctx->poll_with_empty = true;
+  (void) buf1;
 }
 
 /* Verify that the sequence that completed was not superseded. */
