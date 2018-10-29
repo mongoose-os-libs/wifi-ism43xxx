@@ -368,9 +368,15 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
   struct mg_connection *nc = sctx->nc;
   if (nc == NULL) return true;
   if (!ok) {
-    LOG(LL_ERROR,
+    /* It's always -1, even with clean conenction close, so don't panic. */
+    LOG(LL_DEBUG,
         ("%p %d read error %.*s", nc, nc->sock, (int) p.len - 2, p.p));
-    nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+    /* Wait for the rx buffer to drain before closing the connection. */
+    if (sctx->rx_buf.len == 0) {
+      nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+    } else {
+      mg_if_can_recv_cb(nc);
+    }
     return true;
   }
   sctx->rx_p = ism43xxx_process_async_ev(c, p);

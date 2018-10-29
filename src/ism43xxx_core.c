@@ -34,6 +34,8 @@
 #define ISM43XXX_IDLE_TIMEOUT 5
 #define ISM43XXX_DEFAULT_CMD_TIMEOUT 5
 
+static const struct mg_str s_lsep = MG_MK_STR(ISM43XXX_LINE_SEP);
+
 bool ism43xxx_ignore_error(struct ism43xxx_ctx *c,
                            const struct ism43xxx_cmd *cmd, bool ok,
                            struct mg_str p) {
@@ -89,23 +91,21 @@ static const struct ism43xxx_cmd ism43xxx_init_seq[] = {
 
 struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
                                         const struct mg_str p) {
+  static const struct mg_str es = MG_MK_STR(ISM43XXX_ASYNC_RESP_END);
+  static const struct mg_str bs = MG_MK_STR(ISM43XXX_ASYNC_RESP_BEGIN);
   struct mg_str res = p;
-  const char *begin = mg_strstr(p, mg_mk_str(ISM43XXX_ASYNC_RESP_BEGIN));
-  const char *end = mg_strstr(p, mg_mk_str(ISM43XXX_ASYNC_RESP_END));
-  const struct mg_str sep = mg_mk_str(ISM43XXX_LINE_SEP);
   struct mg_str buf;
-  if (begin == NULL || end < begin + (sizeof(ISM43XXX_ASYNC_RESP_BEGIN) - 1)) {
-    return res;
-  }
-  begin += (sizeof(ISM43XXX_ASYNC_RESP_BEGIN) - 1);
-  buf = mg_mk_str_n(begin, end - begin);
+  if (!mg_str_starts_with(p, bs)) return p;
+  const char *end = mg_strstr(p, es);
+  if (end == NULL) return p;
+  buf = mg_mk_str_n(p.p + bs.len, end - (p.p + bs.len));
   while (buf.len > 0) {
     struct mg_str line = buf;
-    const char *eol = mg_strstr(buf, sep);
+    const char *eol = mg_strstr(buf, s_lsep);
     if (eol != NULL) {
       line.len = eol - buf.p;
-      buf.p += sep.len;
-      buf.len -= sep.len;
+      buf.p += s_lsep.len;
+      buf.len -= s_lsep.len;
     }
     LOG(LL_INFO, ("%.*s", (int) line.len, line.p));
     buf.p += line.len;
@@ -486,16 +486,15 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
         c->phase = ISM43XXX_PHASE_CMD;
         break;
       }
-      const struct mg_str sep = mg_mk_str(ISM43XXX_LINE_SEP);
       /* Remove \r\n at the beginning */
       struct mg_str buf = mg_mk_str_n(rxb->buf + 2, rxb->len - 2);
       struct mg_str s = buf, line;
       while (s.len > 0) {
-        const char *eol = mg_strstr(s, sep);
+        const char *eol = mg_strstr(s, s_lsep);
         if (eol != NULL) {
           line = mg_mk_str_n(s.p, (eol - s.p));
-          s.p += line.len + sep.len;
-          s.len -= line.len + sep.len;
+          s.p += line.len + s_lsep.len;
+          s.len -= line.len + s_lsep.len;
           if (line.len == 0) continue;
           // LOG(LL_VERBOSE_DEBUG, ("<- %.*s", (int) line.len, line.p));
         } else if (mg_vcmp(&s, ISM43XXX_PROMPT) == 0) {
