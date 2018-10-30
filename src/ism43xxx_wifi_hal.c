@@ -18,6 +18,7 @@
 /* WiFi HAL API impl */
 
 #include "mgos.h"
+#include "mgos_timers.h"
 #include "mgos_wifi_hal.h"
 
 #include "ism43xxx_core.h"
@@ -25,6 +26,10 @@
 #define ISM43XXX_LINE_SEP "\r\n"
 
 static struct ism43xxx_ctx *s_ctx = NULL;
+static mgos_timer_id s_poll_timer_id = MGOS_INVALID_TIMER_ID;
+static bool s_poll_in_progress = false;
+
+static void ism43xxx_wifi_poll_timer_cb(void *arg);
 
 char *asp(const char *fmt, ...) {
   char *res = NULL;
@@ -145,12 +150,6 @@ static bool ism43xxx_ad_cb(struct ism43xxx_ctx *c,
   return ok;
 }
 
-const struct ism43xxx_cmd ism43xxx_ap_poll_seq[] = {
-    {.cmd = "AR", .ph = ism43xxx_ar_cb},
-    {.cmd = "MR", .ph = ism43xxx_mr_cb},
-    {.cmd = NULL},
-};
-
 bool mgos_wifi_dev_ap_setup(const struct mgos_config_wifi_ap *cfg) {
   bool res = false;
   struct ism43xxx_ctx *c = s_ctx;
@@ -158,6 +157,8 @@ bool mgos_wifi_dev_ap_setup(const struct mgos_config_wifi_ap *cfg) {
   if (!cfg->enable) {
     if (c->mode == ISM43XXX_MODE_AP) {
       ism43xxx_reset(s_ctx, true /* hold */);
+      mgos_clear_timer(s_poll_timer_id);
+      s_poll_timer_id = MGOS_INVALID_TIMER_ID;
     }
     res = true;
     goto out;
@@ -195,7 +196,13 @@ bool mgos_wifi_dev_ap_setup(const struct mgos_config_wifi_ap *cfg) {
     res = ism43xxx_send_seq(c, ism43xxx_ap_setup_seq, true /* copy */) != NULL;
   }
 
-  if (res) c->mode = ISM43XXX_MODE_AP;
+  if (res) {
+    c->mode = ISM43XXX_MODE_AP;
+    mgos_clear_timer(s_poll_timer_id);
+    s_poll_timer_id = mgos_set_timer(1000, MGOS_TIMER_REPEAT,
+                                     ism43xxx_wifi_poll_timer_cb, NULL);
+    s_poll_in_progress = false;
+  }
 
 out:
   return res;
@@ -319,13 +326,6 @@ const struct ism43xxx_cmd ism43xxx_sta_disconnect_seq[] = {
     {.cmd = "CD", .ph = ism43xxx_cd_cb}, {.cmd = NULL},
 };
 
-const struct ism43xxx_cmd ism43xxx_sta_poll_seq[] = {
-    {.cmd = "CR", .ph = ism43xxx_cr_cb},
-    {.cmd = "CS", .ph = ism43xxx_cs_cb},
-    {.cmd = "MR", .ph = ism43xxx_mr_cb},
-    {.cmd = NULL},
-};
-
 bool mgos_wifi_dev_sta_setup(const struct mgos_config_wifi_sta *cfg) {
   bool res = false;
   struct ism43xxx_ctx *c = s_ctx;
@@ -333,6 +333,8 @@ bool mgos_wifi_dev_sta_setup(const struct mgos_config_wifi_sta *cfg) {
   if (!cfg->enable) {
     if (c->mode == ISM43XXX_MODE_STA) {
       ism43xxx_reset(s_ctx, true /* hold */);
+      mgos_clear_timer(s_poll_timer_id);
+      s_poll_timer_id = MGOS_INVALID_TIMER_ID;
     }
     res = true;
     goto out;
@@ -377,6 +379,10 @@ out:
 bool mgos_wifi_dev_sta_connect(void) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) s_ctx;
   if (c->mode != ISM43XXX_MODE_STA) return false;
+  mgos_clear_timer(s_poll_timer_id);
+  s_poll_timer_id = mgos_set_timer(1000, MGOS_TIMER_REPEAT,
+                                   ism43xxx_wifi_poll_timer_cb, NULL);
+  s_poll_in_progress = false;
   return (ism43xxx_send_seq(c, ism43xxx_sta_connect_seq, false /* copy */) !=
           NULL);
 }
@@ -384,6 +390,8 @@ bool mgos_wifi_dev_sta_connect(void) {
 bool mgos_wifi_dev_sta_disconnect(void) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) s_ctx;
   if (c->mode != ISM43XXX_MODE_STA) return false;
+  mgos_clear_timer(s_poll_timer_id);
+  s_poll_timer_id = MGOS_INVALID_TIMER_ID;
   return (ism43xxx_send_seq(c, ism43xxx_sta_disconnect_seq, false /* copy */) !=
           NULL);
 }
@@ -414,6 +422,63 @@ int mgos_wifi_sta_get_rssi(void) {
   return c->sta_rssi;
 }
 
+static bool ism43xxx_mr_cb(struct ism43xxx_ctx *c,
+                           const struct ism43xxx_cmd *cmd, bool ok,
+                           struct mg_str p) {
+  s_poll_in_progress = false;
+  if (!ok) return false;
+  (void) c;
+  (void) cmd;
+  (void) p;
+  return true;
+}
+
+const struct ism43xxx_cmd ism43xxx_ap_poll_seq[] = {
+    {.cmd = "AR", .ph = ism43xxx_ar_cb},
+    {.cmd = "MR", .ph = ism43xxx_mr_cb},
+    {.cmd = NULL},
+};
+
+const struct ism43xxx_cmd ism43xxx_sta_poll_short_seq[] = {
+    {.cmd = "CS", .ph = ism43xxx_cs_cb},
+    {.cmd = "MR", .ph = ism43xxx_mr_cb},
+    {.cmd = NULL},
+};
+
+/* "CR" takes quite a long time to execute, about 300 ms.
+ * So we only send it once in a while. */
+const struct ism43xxx_cmd ism43xxx_sta_poll_long_seq[] = {
+    {.cmd = "CS", .ph = ism43xxx_cs_cb},
+    {.cmd = "CR", .ph = ism43xxx_cr_cb},
+    {.cmd = "MR", .ph = ism43xxx_mr_cb},
+    {.cmd = NULL},
+};
+
+static void ism43xxx_wifi_poll_timer_cb(void *arg) {
+  if (s_ctx == NULL || s_poll_in_progress) return;
+  const struct ism43xxx_cmd *seq = NULL;
+  switch (s_ctx->mode) {
+    case ISM43XXX_MODE_AP: {
+      seq = ism43xxx_ap_poll_seq;
+      break;
+    }
+    case ISM43XXX_MODE_STA: {
+      static uint8_t s_long_ctr = 0;
+      if (++s_long_ctr % 16 == 0) {
+        seq = ism43xxx_sta_poll_long_seq;
+      } else {
+        seq = ism43xxx_sta_poll_short_seq;
+      }
+      break;
+    }
+    default:
+      return;
+  }
+  s_poll_in_progress =
+      (ism43xxx_send_seq(s_ctx, seq, false /* copy */) != NULL);
+  (void) arg;
+}
+
 void mgos_wifi_dev_init(void) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) calloc(1, sizeof(*c));
   const struct mgos_config_wifi_ism43xxx *cfg =
@@ -439,8 +504,6 @@ void mgos_wifi_dev_init(void) {
   c->drdy_gpio = cfg->drdy_gpio;
   c->boot0_gpio = cfg->boot0_gpio;
   c->wakeup_gpio = cfg->wakeup_gpio;
-  c->poll_timer_id = MGOS_INVALID_TIMER_ID;
-  c->startup_timer_id = MGOS_INVALID_TIMER_ID;
 
   if (ism43xxx_init(c)) {
     s_ctx = c;
@@ -449,7 +512,7 @@ void mgos_wifi_dev_init(void) {
 
 bool mgos_wifi_dev_start_scan(void) {
   /* TODO(rojer) */
-  LOG(LL_ERROR, ("Scannig is not implemented!"));
+  LOG(LL_ERROR, ("Scanning is not implemented!"));
   return false;
 }
 

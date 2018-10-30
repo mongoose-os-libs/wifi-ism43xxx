@@ -79,7 +79,7 @@ struct ism43xxx_ctx {
   const struct ism43xxx_cmd *cur_cmd;
 
   mgos_timer_id startup_timer_id;
-  mgos_timer_id poll_timer_id;
+  mgos_timer_id cmd_timeout_timer_id;
   uint8_t mac[6];
   /* Station-related stuff, valid when mode == STA. */
   int8_t sta_rssi;
@@ -91,15 +91,12 @@ struct ism43xxx_ctx {
   /* Flags */
   unsigned int cur_cmd_timeout : 8;
   unsigned int idle_timeout : 8;
-  unsigned int need_poll : 1;
-  unsigned int polling : 1;
   unsigned int print_mac : 1;
   unsigned int print_info : 1;
   unsigned int sta_connected : 1;
   unsigned int ap_running : 1;
 
   void (*if_disconnect_cb)(void *arg);
-  void (*if_data_poll_cb)(void *arg);
   void *if_cb_arg;
 };
 
@@ -140,9 +137,6 @@ bool ism43xxx_parse_mac(const char *s, uint8_t mac[6]);
 
 void ism43xxx_set_sta_status(struct ism43xxx_ctx *c, bool connected,
                              bool force);
-
-bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd,
-                    bool ok, struct mg_str p);
 
 struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
                                         const struct mg_str p);

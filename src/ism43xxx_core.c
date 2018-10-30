@@ -30,7 +30,6 @@
 #define ISM43XXX_ASYNC_RESP_END "[EOMA]"
 
 #define ISM43XXX_STARTUP_DELAY_MS 500
-#define ISM43XXX_POLL_INTERVAL_MS 1000
 #define ISM43XXX_IDLE_TIMEOUT 5
 #define ISM43XXX_DEFAULT_CMD_TIMEOUT 5
 
@@ -116,23 +115,6 @@ struct mg_str ism43xxx_process_async_ev(struct ism43xxx_ctx *c,
   (void) c;
   return res;
 }
-
-bool ism43xxx_mr_cb(struct ism43xxx_ctx *c, const struct ism43xxx_cmd *cmd,
-                    bool ok, struct mg_str p) {
-  if (!ok) return false;
-  c->polling = false;
-  (void) cmd;
-  (void) p;
-  return true;
-}
-
-static const struct ism43xxx_cmd ism43xxx_poll_seq[] = {
-    {.cmd = "MR", .ph = ism43xxx_mr_cb}, {.cmd = NULL},
-};
-
-extern const struct ism43xxx_cmd ism43xxx_ap_poll_seq[];
-
-extern const struct ism43xxx_cmd ism43xxx_sta_poll_seq[];
 
 static void ism43xxx_state_cb(void *arg);
 
@@ -339,10 +321,8 @@ static void ism43xxx_startup_timer_cb(void *arg) {
   ism43xxx_state_cb(arg);
 }
 
-static void ism43xxx_poll_timer_cb(void *arg) {
+static void ism43xxx_cmd_timeout_timer_cb(void *arg) {
   struct ism43xxx_ctx *c = (struct ism43xxx_ctx *) arg;
-  static int poll_intvl = 0;
-  if (++poll_intvl % 4 == 0) c->need_poll = true;
   if (c->idle_timeout > 0) c->idle_timeout--;
   if (c->cur_cmd_timeout > 0) c->cur_cmd_timeout--;
   ism43xxx_state_cb(arg);
@@ -363,9 +343,8 @@ void ism43xxx_reset(struct ism43xxx_ctx *c, bool hold) {
     uint8_t cb = 0;
     ism43xxx_send_cmd(c, &zr, &tot_len, &carry, &cb);
   }
-  mgos_clear_timer(c->poll_timer_id);
-  c->poll_timer_id = MGOS_INVALID_TIMER_ID;
-  c->polling = c->need_poll = false;
+  mgos_clear_timer(c->cmd_timeout_timer_id);
+  c->cmd_timeout_timer_id = MGOS_INVALID_TIMER_ID;
   mgos_clear_timer(c->startup_timer_id);
   c->startup_timer_id = MGOS_INVALID_TIMER_ID;
   while (c->seq_q[0] != NULL) {
@@ -425,31 +404,16 @@ static void ism43xxx_state_cb2(struct ism43xxx_ctx *c, struct mbuf *rxb) {
       mgos_gpio_enable_int(c->drdy_gpio);
       c->phase = ISM43XXX_PHASE_CMD;
       c->idle_timeout = ISM43XXX_IDLE_TIMEOUT;
-      c->poll_timer_id = mgos_set_timer(ISM43XXX_POLL_INTERVAL_MS,
-                                        MGOS_TIMER_RUN_NOW | MGOS_TIMER_REPEAT,
-                                        ism43xxx_poll_timer_cb, c);
+      c->cmd_timeout_timer_id = mgos_set_timer(
+          1000, MGOS_TIMER_REPEAT, ism43xxx_cmd_timeout_timer_cb, c);
       break;
     }
     case ISM43XXX_PHASE_CMD: {
       if (!drdy) break; /* In this case DRDY means "ready for command". */
-      if (c->need_poll && !c->polling) {
-        c->need_poll = false;
-        c->polling = true;
-        switch (c->mode) {
-          case ISM43XXX_MODE_AP:
-            ism43xxx_send_seq(c, ism43xxx_ap_poll_seq, false /* copy */);
-            break;
-          case ISM43XXX_MODE_STA:
-            ism43xxx_send_seq(c, ism43xxx_sta_poll_seq, false /* copy */);
-            break;
-          case ISM43XXX_MODE_IDLE:
-            ism43xxx_send_seq(c, ism43xxx_poll_seq, false /* copy */);
-            if (c->idle_timeout <= 0 && c->rst_gpio >= 0) {
-              ism43xxx_reset(c, true /* hold */);
-              return;
-            }
-            break;
-        }
+      if (c->mode == ISM43XXX_MODE_IDLE && c->idle_timeout <= 0 &&
+          c->rst_gpio >= 0) {
+        ism43xxx_reset(c, true /* hold */);
+        return;
       }
       size_t tot_cmd_len = 0;
       bool carry = false;
@@ -543,10 +507,6 @@ static void ism43xxx_state_cb(void *arg) {
   mbuf_init(&rxb, 0);
   ism43xxx_state_cb2(c, &rxb);
   mbuf_free(&rxb);
-  /* No commands but module signals data ready? Do a poll. */
-  if (c->cur_cmd == NULL && mgos_gpio_read(c->drdy_gpio)) {
-    if (c->if_data_poll_cb != NULL) c->if_data_poll_cb(c->if_cb_arg);
-  }
 }
 
 static void ism43xxx_drdy_int_cb(int pin, void *arg) {

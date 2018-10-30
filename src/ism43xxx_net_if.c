@@ -18,8 +18,12 @@
 /* Mongoose net_if impl */
 
 #include "mgos.h"
+#include "mgos_timers.h"
 
 #include "ism43xxx_core.h"
+
+#define ISM43XXX_DATA_POLL_MIN_MS 50
+#define ISM43XXX_DATA_POLL_MAX_MS 500
 
 struct ism43xxx_socket_ctx {
   struct mg_connection *nc;
@@ -32,12 +36,16 @@ struct ism43xxx_socket_ctx {
 
 struct ism43xxx_if_ctx {
   struct ism43xxx_ctx *ism_ctx;
-  const struct ism43xxx_cmd *cur_poll_seq;
+  const struct ism43xxx_cmd *cur_data_poll_seq;
   struct ism43xxx_socket_ctx sockets[ISM43XXX_AP_MAX_SOCKETS];
+  mgos_timer_id data_poll_timer_id;
+  int cur_data_poll_interval_ms;
+  bool data_poll_got_data;
 };
 
 static void ism43xxx_core_disconnect(void *arg);
-static void ism43xxx_core_data_poll(void *arg);
+static void ism43xxx_if_sched_data_poll(struct ism43xxx_if_ctx *ctx,
+                                        int new_data_poll_interval_ms);
 
 static bool ism43xxx_socket_send_seq(struct ism43xxx_socket_ctx *sctx,
                                      const struct ism43xxx_cmd *seq,
@@ -112,7 +120,6 @@ static bool ism43xxx_socket_find_free(struct ism43xxx_if_ctx *ctx,
       LOG(LL_ERROR, ("Wifi not active"));
       return false;
     }
-    ctx->ism_ctx->if_data_poll_cb = ism43xxx_core_data_poll;
     ctx->ism_ctx->if_disconnect_cb = ism43xxx_core_disconnect;
     ctx->ism_ctx->if_cb_arg = ctx;
   }
@@ -153,7 +160,11 @@ static bool connect_seq_done_cb(struct ism43xxx_ctx *c,
   if (!ism43xxx_socket_verify_seq(sctx, cmd)) return true;
   sctx->cur_seq = NULL;
   struct mg_connection *nc = sctx->nc;
-  if (nc != NULL) mg_if_connect_cb(nc, (ok ? 0 : -1));
+  if (nc != NULL) {
+    mg_if_connect_cb(nc, (ok ? 0 : -1));
+    struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
+    if (ok) ism43xxx_if_sched_data_poll(ctx, ISM43XXX_DATA_POLL_MIN_MS);
+  }
   (void) c;
   (void) p;
   return true;
@@ -336,10 +347,10 @@ static void ism43xxx_if_free(struct mg_iface *iface) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) iface->data;
   iface->data = NULL;
   if (ctx->ism_ctx != NULL) {
-    ctx->ism_ctx->if_data_poll_cb = NULL;
     ctx->ism_ctx->if_disconnect_cb = NULL;
     ctx->ism_ctx->if_cb_arg = NULL;
   }
+  mgos_clear_timer(ctx->data_poll_timer_id);
   free(ctx);
 }
 
@@ -367,6 +378,7 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
       (struct ism43xxx_socket_ctx *) cmd->user_data;
   struct mg_connection *nc = sctx->nc;
   if (nc == NULL) return true;
+  struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) nc->iface->data;
   if (!ok) {
     /* It's always -1, even with clean conenction close, so don't panic. */
     LOG(LL_DEBUG,
@@ -384,6 +396,7 @@ static bool ism43xxx_r0_cb(struct ism43xxx_ctx *c,
     sctx->rx_p.len -= 2; /* Remove \r\n at the end */
     LOG(LL_VERBOSE_DEBUG,
         ("%p %d <- %d", sctx->nc, sctx->nc->sock, (int) sctx->rx_p.len));
+    ctx->data_poll_got_data = true;
     // mg_hexdumpf(stderr, sctx->rx_p.p, sctx->rx_p.len);
     mg_if_can_recv_cb(nc);
     if (sctx->rx_p.len > 0) {
@@ -399,29 +412,25 @@ static bool ism43xxx_poll_done(struct ism43xxx_ctx *c,
                                const struct ism43xxx_cmd *cmd, bool ok,
                                struct mg_str p) {
   struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) cmd->user_data;
-  ctx->cur_poll_seq = NULL;
+  ctx->cur_data_poll_seq = NULL;
+  int new_data_poll_interval_ms;
+  if (ctx->data_poll_got_data) {
+    new_data_poll_interval_ms = 0; /* Poll again immediately */
+  } else {
+    new_data_poll_interval_ms = MIN(
+        ISM43XXX_DATA_POLL_MAX_MS,
+        MAX(ISM43XXX_DATA_POLL_MIN_MS, (ctx->cur_data_poll_interval_ms * 2)));
+  }
+  ism43xxx_if_sched_data_poll(ctx, new_data_poll_interval_ms);
   (void) c;
   (void) ok;
   (void) p;
   return true;
 }
 
-static void ism43xxx_core_disconnect(void *arg) {
-  struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
-  LOG(LL_DEBUG, ("disconnect"));
-  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
-    struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
-    if (sctx->nc == NULL) continue;
-    sctx->nc->flags |= MG_F_CLOSE_IMMEDIATELY;
-    sctx->nc->sock = INVALID_SOCKET;
-    sctx->cur_seq = NULL;
-    sctx->nc = NULL;
-  }
-}
-
-static void ism43xxx_core_data_poll(void *arg) {
+static void ism43xxx_if_data_poll(struct ism43xxx_if_ctx *ctx) {
   struct ism43xxx_cmd *cmd;
-  struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
+  if (ctx->cur_data_poll_seq != NULL) return;
   struct ism43xxx_cmd *poll_seq = (struct ism43xxx_cmd *) calloc(
       (ARRAY_SIZE(ctx->sockets) * 2) + 1, sizeof(*poll_seq));
   if (poll_seq == NULL) return;
@@ -442,19 +451,57 @@ static void ism43xxx_core_data_poll(void *arg) {
       cmd->user_data = sctx;
     }
   }
+  ctx->data_poll_got_data = false;
   if (j > 0) {
     cmd = &poll_seq[j++];
     cmd->free = true;
     cmd->ph = ism43xxx_poll_done;
     cmd->user_data = ctx;
-    ctx->cur_poll_seq =
+    ctx->cur_data_poll_seq =
         ism43xxx_send_seq(ctx->ism_ctx, poll_seq, false /* copy */);
-    if (ctx->cur_poll_seq == NULL) {
+    if (ctx->cur_data_poll_seq == NULL) {
       free(poll_seq);
     }
   } else {
     free(poll_seq);
   }
+}
+
+static void ism43xxx_if_data_poll_timer_cb(void *arg) {
+  struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
+  ctx->data_poll_timer_id = MGOS_INVALID_TIMER_ID;
+  ism43xxx_if_data_poll(ctx);
+}
+
+static void ism43xxx_if_sched_data_poll(struct ism43xxx_if_ctx *ctx,
+                                        int new_data_poll_interval_ms) {
+  if (ctx->cur_data_poll_seq != NULL) return;
+  if (new_data_poll_interval_ms == 0) {
+    // We want it NOW.
+    ism43xxx_if_data_poll(ctx);
+    mgos_clear_timer(ctx->data_poll_timer_id);
+    ctx->data_poll_timer_id = MGOS_INVALID_TIMER_ID;
+  } else if (ctx->data_poll_timer_id == MGOS_INVALID_TIMER_ID ||
+             new_data_poll_interval_ms != ctx->cur_data_poll_interval_ms) {
+    mgos_clear_timer(ctx->data_poll_timer_id);
+    ctx->data_poll_timer_id = mgos_set_timer(
+        new_data_poll_interval_ms, 0, ism43xxx_if_data_poll_timer_cb, ctx);
+  }
+  ctx->cur_data_poll_interval_ms = new_data_poll_interval_ms;
+}
+
+static void ism43xxx_core_disconnect(void *arg) {
+  struct ism43xxx_if_ctx *ctx = (struct ism43xxx_if_ctx *) arg;
+  LOG(LL_DEBUG, ("disconnect"));
+  for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
+    struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
+    if (sctx->nc == NULL) continue;
+    sctx->nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+    sctx->nc->sock = INVALID_SOCKET;
+    sctx->cur_seq = NULL;
+    sctx->nc = NULL;
+  }
+  ctx->cur_data_poll_seq = NULL;
 }
 
 static time_t ism43xxx_if_poll(struct mg_iface *iface, int timeout_ms) {
