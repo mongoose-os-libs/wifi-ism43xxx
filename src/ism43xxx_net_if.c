@@ -22,8 +22,13 @@
 
 #include "ism43xxx_core.h"
 
+#ifndef ISM43XXX_DATA_POLL_MIN_MS
 #define ISM43XXX_DATA_POLL_MIN_MS 50
+#endif
+
+#ifndef ISM43XXX_DATA_POLL_MAX_MS
 #define ISM43XXX_DATA_POLL_MAX_MS 500
+#endif
 
 struct ism43xxx_socket_ctx {
   struct mg_connection *nc;
