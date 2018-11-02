@@ -428,12 +428,12 @@ static bool ism43xxx_poll_done(struct ism43xxx_ctx *c,
   return true;
 }
 
-static void ism43xxx_if_data_poll(struct ism43xxx_if_ctx *ctx) {
+static bool ism43xxx_if_data_poll(struct ism43xxx_if_ctx *ctx) {
   struct ism43xxx_cmd *cmd;
-  if (ctx->cur_data_poll_seq != NULL) return;
+  if (ctx->cur_data_poll_seq != NULL) return false;
   struct ism43xxx_cmd *poll_seq = (struct ism43xxx_cmd *) calloc(
       (ARRAY_SIZE(ctx->sockets) * 2) + 1, sizeof(*poll_seq));
-  if (poll_seq == NULL) return;
+  if (poll_seq == NULL) return false;
   int j = 0;
   for (int i = 0; i < (int) ARRAY_SIZE(ctx->sockets); i++) {
     struct ism43xxx_socket_ctx *sctx = &ctx->sockets[i];
@@ -461,9 +461,13 @@ static void ism43xxx_if_data_poll(struct ism43xxx_if_ctx *ctx) {
         ism43xxx_send_seq(ctx->ism_ctx, poll_seq, false /* copy */);
     if (ctx->cur_data_poll_seq == NULL) {
       free(poll_seq);
+      return false;
+    } else {
+      return true;
     }
   } else {
     free(poll_seq);
+    return false;
   }
 }
 
@@ -477,12 +481,15 @@ static void ism43xxx_if_sched_data_poll(struct ism43xxx_if_ctx *ctx,
                                         int new_data_poll_interval_ms) {
   if (ctx->cur_data_poll_seq != NULL) return;
   if (new_data_poll_interval_ms == 0) {
-    // We want it NOW.
-    ism43xxx_if_data_poll(ctx);
+    /* We want it NOW. */
     mgos_clear_timer(ctx->data_poll_timer_id);
     ctx->data_poll_timer_id = MGOS_INVALID_TIMER_ID;
-  } else if (ctx->data_poll_timer_id == MGOS_INVALID_TIMER_ID ||
-             new_data_poll_interval_ms != ctx->cur_data_poll_interval_ms) {
+    if (ism43xxx_if_data_poll(ctx)) return;
+    /* Couldn't do right away, schedule after minimal delay. */
+    new_data_poll_interval_ms = ISM43XXX_DATA_POLL_MIN_MS;
+  }
+  if (ctx->data_poll_timer_id == MGOS_INVALID_TIMER_ID ||
+      new_data_poll_interval_ms != ctx->cur_data_poll_interval_ms) {
     mgos_clear_timer(ctx->data_poll_timer_id);
     ctx->data_poll_timer_id = mgos_set_timer(
         new_data_poll_interval_ms, 0, ism43xxx_if_data_poll_timer_cb, ctx);
