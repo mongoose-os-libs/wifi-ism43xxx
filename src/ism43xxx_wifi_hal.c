@@ -220,7 +220,9 @@ void ism43xxx_set_sta_status(struct ism43xxx_ctx *c, bool connected,
         mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_IP_ACQUIRED, NULL);
       }
     } else {
-      mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_DISCONNECTED, NULL);
+      struct mgos_wifi_sta_disconnected_arg arg;
+      memset(&arg, 0, sizeof(arg));
+      mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_DISCONNECTED, &arg);
       if (c->if_disconnect_cb != NULL) c->if_disconnect_cb(c->if_cb_arg);
     }
   }
