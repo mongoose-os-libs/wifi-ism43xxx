@@ -98,25 +98,27 @@ static bool ism43xxx_ar_cb(struct ism43xxx_ctx *c,
     if (ci->gen != 0) n++;
   }
   /* Sweep away clients that are gone. */
+  struct mgos_wifi_dev_event_info dei = {
+      .ev = MGOS_WIFI_EV_AP_STA_DISCONNECTED,
+  };
   for (int i = 0; i < (int) ARRAY_SIZE(c->ap_clients); i++) {
     struct ism43xxx_client_info *ci = &c->ap_clients[i];
     if (ci->gen == 0 || ci->gen == gen) continue;
-    struct mgos_wifi_ap_sta_disconnected_arg arg;
-    memset(&arg, 0, sizeof(arg));
-    memcpy(arg.mac, ci->mac, sizeof(arg.mac));
-    mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_AP_STA_DISCONNECTED, &arg);
+    memcpy(dei.ap_sta_disconnected.mac, ci->mac,
+           sizeof(dei.ap_sta_disconnected.mac));
     memset(&c->ap_clients[i], 0, sizeof(c->ap_clients[i]));
+    mgos_wifi_dev_event_cb(&dei);
   }
   /* Add new clients */
+  dei.ev = MGOS_WIFI_EV_AP_STA_CONNECTED;
   for (int i = 0; i < n; i++) {
     struct ism43xxx_client_info *ci = &ap_clients[i];
     for (int j = 0; i < (int) ARRAY_SIZE(c->ap_clients); j++) {
       if (c->ap_clients[j].gen == 0) {
+        memcpy(dei.ap_sta_connected.mac, ci->mac,
+               sizeof(dei.ap_sta_disconnected.mac));
         memcpy(&c->ap_clients[j], ci, sizeof(c->ap_clients[j]));
-        struct mgos_wifi_ap_sta_connected_arg arg;
-        memset(&arg, 0, sizeof(arg));
-        memcpy(arg.mac, ci->mac, sizeof(arg.mac));
-        mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_AP_STA_CONNECTED, &arg);
+        mgos_wifi_dev_event_cb(&dei);
         break;
       }
     }
@@ -215,14 +217,24 @@ void ism43xxx_set_sta_status(struct ism43xxx_ctx *c, bool connected,
   if (connected != c->sta_connected || force) {
     c->sta_connected = connected;
     if (connected) {
-      mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_CONNECTED, NULL);
+      struct mgos_wifi_dev_event_info dei = {
+          .ev = MGOS_WIFI_EV_STA_CONNECTED,
+          // BSSID and channel are not available.
+      };
+      mgos_wifi_dev_event_cb(&dei);
       if (c->sta_ip_info.ip.sin_addr.s_addr != 0) {
-        mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_IP_ACQUIRED, NULL);
+        dei.ev = MGOS_WIFI_EV_STA_IP_ACQUIRED;
+        mgos_wifi_dev_event_cb(&dei);
       }
     } else {
-      struct mgos_wifi_sta_disconnected_arg arg;
-      memset(&arg, 0, sizeof(arg));
-      mgos_wifi_dev_on_change_cb(MGOS_WIFI_EV_STA_DISCONNECTED, &arg);
+      struct mgos_wifi_dev_event_info dei = {
+          .ev = MGOS_WIFI_EV_STA_DISCONNECTED,
+          .sta_disconnected =
+              {
+               .reason = 0,  // Reason? We don't know.
+              },
+      };
+      mgos_wifi_dev_event_cb(&dei);
       if (c->if_disconnect_cb != NULL) c->if_disconnect_cb(c->if_cb_arg);
     }
   }
