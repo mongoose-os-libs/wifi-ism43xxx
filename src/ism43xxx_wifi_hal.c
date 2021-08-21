@@ -295,6 +295,7 @@ static bool ism43xxx_cinfo_cb(struct ism43xxx_ctx *c,
           LOG(LL_WARN, ("BUG: DNS is not set, using default. "
                         "Please Update the es-WiFi module FW."));
         } else {
+          mgos_net_str_to_ip_n(dns, &c->sta_ip_info.dns);
         }
       }
     }
@@ -424,11 +425,6 @@ bool mgos_wifi_dev_get_ip_info(int if_instance,
     memset(ip_info, 0, sizeof(*ip_info));
   }
   return res;
-}
-
-char *mgos_wifi_get_sta_default_dns(void) {
-  /* I don't think this is even possible... */
-  return NULL;
 }
 
 int mgos_wifi_sta_get_rssi(void) {
